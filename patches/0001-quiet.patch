@@ -1,6 +1,6 @@
 diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/background.ts build/src/background.ts
 --- a/src/background.ts	2026-10-30 15:09:30
-+++ b/src/background.ts	2026-10-30 15:10:47
++++ b/src/background.ts	2026-10-30 15:21:16
 @@ -17,6 +17,7 @@
  import { debugLog } from './relayConnection';
  import { PendingConnections } from './pendingConnection';
@@ -30,7 +30,7 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +startQuietBroker();
 diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/connectedTabGroup.ts build/src/connectedTabGroup.ts
 --- a/src/connectedTabGroup.ts	2026-10-30 15:09:30
-+++ b/src/connectedTabGroup.ts	2026-10-30 15:10:47
++++ b/src/connectedTabGroup.ts	2026-10-30 15:21:16
 @@ -75,6 +75,10 @@
    private _connection: RelayConnection;
    private _isTabReserved: (tabId: number) => boolean;
@@ -63,8 +63,8 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
            await chrome.tabs.group({ groupId: this._groupId, tabIds: [tabId] });
 diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/quietBroker.ts build/src/quietBroker.ts
 --- a/src/quietBroker.ts	1969-12-31 18:00:00
-+++ b/src/quietBroker.ts	2026-10-30 15:21:15
-@@ -0,0 +1,118 @@
++++ b/src/quietBroker.ts	2026-10-30 15:30:07
+@@ -0,0 +1,124 @@
 +/**
 + * quiet fork (TR #2044): keep a WebSocket to the local /pw broker and open connect pages it hands
 + * us in UNFOCUSED windows. The stock flow has the MCP exec Chrome with --new-window <connect url>,
@@ -133,11 +133,17 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +  const win = await chrome.windows.create({ url: url.toString(), focused: false, type: 'normal', ...bounds });
 +  if (!win)
 +    throw new Error('chrome.windows.create returned no window');
-+  if (message.name && win.id !== undefined)
-+    await chrome.tabs.create({ windowId: win.id, url: titleTabUrl(message.name), pinned: true, index: 0, active: false }).catch(() => {});
++  let titleTab: string | number | undefined;
++  if (message.name && win.id !== undefined) {
++    try {
++      titleTab = (await chrome.tabs.create({ windowId: win.id, url: titleTabUrl(message.name), pinned: true, index: 0, active: false })).id;
++    } catch (error: any) {
++      titleTab = 'error: ' + (error?.message || error);
++    }
++  }
 +  if (message.minimized && win.id !== undefined)
 +    await chrome.windows.update(win.id, { state: 'minimized' }).catch(() => {});
-+  send({ type: 'opened', id: message.id, windowId: win.id, tabId: win.tabs?.[0]?.id });
++  send({ type: 'opened', id: message.id, windowId: win.id, tabId: win.tabs?.[0]?.id, titleTab, name: message.name });
 +}
 +
 +function connect(): void {
@@ -185,7 +191,7 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +}
 diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/relayConnection.ts build/src/relayConnection.ts
 --- a/src/relayConnection.ts	2026-10-30 15:09:30
-+++ b/src/relayConnection.ts	2026-10-30 15:10:47
++++ b/src/relayConnection.ts	2026-10-30 15:21:16
 @@ -72,6 +72,9 @@
    onclose?: () => void;
    ontabattached?: (tabId: number) => void;
@@ -220,7 +226,7 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
        const target = args[0] as chrome.debugger.Debuggee | undefined;
 diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/ui/authToken.tsx build/src/ui/authToken.tsx
 --- a/src/ui/authToken.tsx	2026-10-30 15:09:30
-+++ b/src/ui/authToken.tsx	2026-10-30 15:10:47
++++ b/src/ui/authToken.tsx	2026-10-30 15:21:16
 @@ -25,6 +25,7 @@
    const onRegenerateToken = useCallback(() => {
      const newToken = generateAuthToken();

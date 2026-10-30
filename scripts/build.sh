@@ -20,11 +20,15 @@ const upstreamVersion = m.version;
 m.name = "Playwright Extension (quiet)";
 m.version = `${upstreamVersion}.${suffix}`;
 m.version_name = `${upstreamVersion}-quiet.${suffix}`;
-m.description = "Fork of the Playwright Extension that never steals keyboard focus: connect pages and new tabs open in unfocused windows through a local broker. " + m.description;
+// The Web Store caps the manifest description at 132 characters.
+m.description = "Fork of the Playwright Extension that never steals keyboard focus: connect pages and new tabs open in unfocused windows.";
 m.permissions = [...new Set([...(m.permissions || []), "alarms", "storage"])];
 m.action.default_title = m.name;
-// Stable extension id for unpacked and Web Store installs: the public key of key.pem
-// (pmaxhogan's, kept out of the repo). The Web Store honours a manifest key on upload.
+// dist/ (unpacked, Load unpacked) carries the public key of key.pem (pmaxhogan's, kept out of
+// the repo) so its id is stable: jiobfmhnaneikbfofhbdkklfgennkcmn. The Web Store REJECTS a
+// manifest with a key field ("key field is not allowed in manifest", measured 2026-10-30), so the
+// zip for the store is built without it and gets the id the store assigned on first upload.
+fs.writeFileSync("build/manifest.store.json", JSON.stringify(m, null, 2) + "\n");
 m.key = fs.readFileSync("pubkey.b64", "utf8").trim();
 fs.writeFileSync("build/manifest.json", JSON.stringify(m, null, 2) + "\n");
 const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
@@ -38,6 +42,7 @@ ln -sfn ../node_modules build/node_modules
 (cd build && npx tsc -p tsconfig.json && npx tsc -p tsconfig.ui.json && npx vite build >/dev/null)
 mv build/dist dist
 version="$(node -p 'require("./dist/manifest.json").version')"
+rm -rf dist-store && cp -R dist dist-store && cp build/manifest.store.json dist-store/manifest.json
 rm -f playwright-extension-quiet-*.zip
-(cd dist && zip -qr "../playwright-extension-quiet-$version.zip" .)
-echo "built dist/ and playwright-extension-quiet-$version.zip"
+(cd dist-store && zip -qr "../playwright-extension-quiet-$version.zip" .)
+echo "built dist/ (unpacked, keyed) and playwright-extension-quiet-$version.zip (store, no key)"

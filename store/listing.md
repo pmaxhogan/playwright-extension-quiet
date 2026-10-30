@@ -30,6 +30,7 @@ with the manifest.
 
 - Icon: upstream icons/icon-128.png (unchanged)
 - Note: the pinned first tab in each agent window is a data: URL page titled with the agent name (no network).
+- The store zip is built WITHOUT the manifest key (the store rejects it); the store assigns its own id on first upload, so the store install has a different id from the unpacked dev install (jiobfmhnaneikbfofhbdkklfgennkcmn).
 - Screenshots: at least one 1280x800 screenshot is required; capture the status page
   (chrome-extension://jiobfmhnaneikbfofhbdkklfgennkcmn/status.html) at 1280x800.
 - Official URL / homepage: https://github.com/pmaxhogan/playwright-extension-quiet
