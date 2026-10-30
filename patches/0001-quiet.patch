@@ -1,6 +1,6 @@
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream/packages/extension/src/background.ts quiet/src/background.ts
---- a/src/background.ts
-+++ b/src/background.ts
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/background.ts build/src/background.ts
+--- a/src/background.ts	2026-10-30 15:09:30
++++ b/src/background.ts	2026-10-30 15:10:47
 @@ -17,6 +17,7 @@
  import { debugLog } from './relayConnection';
  import { PendingConnections } from './pendingConnection';
@@ -28,9 +28,9 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream
  
  new PlaywrightExtension();
 +startQuietBroker();
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream/packages/extension/src/connectedTabGroup.ts quiet/src/connectedTabGroup.ts
---- a/src/connectedTabGroup.ts
-+++ b/src/connectedTabGroup.ts
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/connectedTabGroup.ts build/src/connectedTabGroup.ts
+--- a/src/connectedTabGroup.ts	2026-10-30 15:09:30
++++ b/src/connectedTabGroup.ts	2026-10-30 15:10:47
 @@ -75,6 +75,10 @@
    private _connection: RelayConnection;
    private _isTabReserved: (tabId: number) => boolean;
@@ -61,10 +61,10 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream
            await chrome.tabGroups.update(this._groupId, this.groupStyle);
          } else {
            await chrome.tabs.group({ groupId: this._groupId, tabIds: [tabId] });
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream/packages/extension/src/quietBroker.ts quiet/src/quietBroker.ts
---- a/src/quietBroker.ts
-+++ b/src/quietBroker.ts
-@@ -0,0 +1,108 @@
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/quietBroker.ts build/src/quietBroker.ts
+--- a/src/quietBroker.ts	1969-12-31 18:00:00
++++ b/src/quietBroker.ts	2026-10-30 15:21:15
+@@ -0,0 +1,118 @@
 +/**
 + * quiet fork (TR #2044): keep a WebSocket to the local /pw broker and open connect pages it hands
 + * us in UNFOCUSED windows. The stock flow has the MCP exec Chrome with --new-window <connect url>,
@@ -95,7 +95,15 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream
 +  token?: string;
 +  minimized?: boolean;
 +  bounds?: { width?: number; height?: number; left?: number; top?: number };
++  // Agent name: shown as a pinned first tab so the window is identifiable at a glance.
++  name?: string;
 +};
++
++function titleTabUrl(name: string): string {
++  const safe = name.replace(/[<>&"]/g, '');
++  const html = `<!doctype html><title>${safe}</title><meta charset="utf-8"><body style="margin:0;font:16px -apple-system,sans-serif;background:#1f2937;color:#f9fafb;display:flex;align-items:center;justify-content:center;height:100vh"><div style="text-align:center"><div style="font-size:12px;letter-spacing:.2em;opacity:.7">AGENT WINDOW</div><div style="font-size:40px;font-weight:700;margin:12px 0">${safe}</div><div style="opacity:.7">Driven by a Claude Code session. You can click into any tab here and type; the agent keeps working.</div></div></body>`;
++  return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
++}
 +
 +async function storedToken(): Promise<string | undefined> {
 +  const { 'auth-token': token } = await chrome.storage.local.get('auth-token');
@@ -125,6 +133,8 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream
 +  const win = await chrome.windows.create({ url: url.toString(), focused: false, type: 'normal', ...bounds });
 +  if (!win)
 +    throw new Error('chrome.windows.create returned no window');
++  if (message.name && win.id !== undefined)
++    await chrome.tabs.create({ windowId: win.id, url: titleTabUrl(message.name), pinned: true, index: 0, active: false }).catch(() => {});
 +  if (message.minimized && win.id !== undefined)
 +    await chrome.windows.update(win.id, { state: 'minimized' }).catch(() => {});
 +  send({ type: 'opened', id: message.id, windowId: win.id, tabId: win.tabs?.[0]?.id });
@@ -173,9 +183,9 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream
 +      void hello();
 +  });
 +}
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream/packages/extension/src/relayConnection.ts quiet/src/relayConnection.ts
---- a/src/relayConnection.ts
-+++ b/src/relayConnection.ts
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/relayConnection.ts build/src/relayConnection.ts
+--- a/src/relayConnection.ts	2026-10-30 15:09:30
++++ b/src/relayConnection.ts	2026-10-30 15:10:47
 @@ -72,6 +72,9 @@
    onclose?: () => void;
    ontabattached?: (tabId: number) => void;
@@ -208,9 +218,9 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream
      // Attach bookkeeping; detach flows through the chrome.debugger.onDetach event.
      if (message.method === 'chrome.debugger.attach') {
        const target = args[0] as chrome.debugger.Debuggee | undefined;
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream/packages/extension/src/ui/authToken.tsx quiet/src/ui/authToken.tsx
---- a/src/ui/authToken.tsx
-+++ b/src/ui/authToken.tsx
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/ui/authToken.tsx build/src/ui/authToken.tsx
+--- a/src/ui/authToken.tsx	2026-10-30 15:09:30
++++ b/src/ui/authToken.tsx	2026-10-30 15:10:47
 @@ -25,6 +25,7 @@
    const onRegenerateToken = useCallback(() => {
      const newToken = generateAuthToken();
