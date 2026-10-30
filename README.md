@@ -83,3 +83,17 @@ The first upload must be done by hand in the developer dashboard to create the l
 
 Apache-2.0, see `LICENSE`. `upstream/` is Microsoft's code, copied verbatim; see `NOTICE`.
 This project is not affiliated with or endorsed by Microsoft.
+
+## Publishing state (2026-10-30)
+
+- Chrome Web Store item: `djphaomahfdjobipmjingddpnnihknnk` (unlisted, uploaded as 0.4.0.2 by hand, listing and
+  privacy practices drafted; Max submits for review). The store rejects a manifest `key`, so the
+  store build has no key and its id differs from the keyed unpacked build
+  (`jiobfmhnaneikbfofhbdkklfgennkcmn`).
+- Publisher OAuth: Google Cloud project `pwq-publisher` (personal account), Desktop client
+  `pwq-publisher-ci`, Chrome Web Store API enabled, OAuth app published to production (a Testing
+  app's refresh tokens expire after 7 days). The four `CWS_*` Actions secrets are set; the
+  `Publish` workflow uploads and auto-publishes every new version from main.
+- Re-minting the refresh token: open the consent URL from the chrome-webstore-upload guide with
+  `redirect_uri=http://localhost:8818`, catch the code with a one-shot local listener, exchange it
+  at `https://oauth2.googleapis.com/token`, then `gh secret set CWS_REFRESH_TOKEN`.
