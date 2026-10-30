@@ -19,7 +19,7 @@ jobs:
       - run: npm ci
       - run: npm run check-ascii
       - run: scripts/build.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: playwright-extension-quiet
           path: playwright-extension-quiet-*.zip
