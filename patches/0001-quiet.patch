@@ -1,0 +1,230 @@
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream/packages/extension/src/background.ts quiet/src/background.ts
+--- a/src/background.ts
++++ b/src/background.ts
+@@ -17,6 +17,7 @@
+ import { debugLog } from './relayConnection';
+ import { PendingConnections } from './pendingConnection';
+ import { ConnectedTabGroup, cleanupStalePlaywrightGroups, isNonDebuggableUrl, ungroupTabs, uniqueGroupStyle } from './connectedTabGroup';
++import { startQuietBroker } from './quietBroker';
+ 
+ type PageMessage = {
+   type: 'connectionRequested';
+@@ -116,10 +117,9 @@
+       group.onclose = () => this._connections.delete(id);
+       this._connections.set(id, group);
+ 
+-      await Promise.all([
+-        chrome.tabs.update(tab.id, { active: true }),
+-        chrome.windows.update(tab.windowId, { focused: true }),
+-      ]).catch(() => {});
++      // quiet fork: activate the tab inside its own window, but never focus the window - that
++      // activates Chrome and steals the user's keyboard (TR #2044).
++      await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+ 
+       if (tab.id !== selectorTabId)
+         await chrome.tabs.remove(selectorTabId).catch(() => {});
+@@ -159,3 +159,4 @@
+ }
+ 
+ new PlaywrightExtension();
++startQuietBroker();
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream/packages/extension/src/connectedTabGroup.ts quiet/src/connectedTabGroup.ts
+--- a/src/connectedTabGroup.ts
++++ b/src/connectedTabGroup.ts
+@@ -75,6 +75,10 @@
+   private _connection: RelayConnection;
+   private _isTabReserved: (tabId: number) => boolean;
+   private _groupId: number | null = null;
++  // quiet fork: chrome.tabs.group() without createProperties.windowId creates the group in the
++  // CURRENT (last-focused) window and drags the tab there - into the user's window, or out of the
++  // unfocused window the connect page was opened in. Create it in the client's own window.
++  private _homeWindowId: number | undefined;
+   private _groupTabIds: Set<number> = new Set();
+   private _onTabUpdatedListener: (tabId: number, changeInfo: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => void;
+   private _onTabRemovedListener: (tabId: number) => void;
+@@ -86,6 +90,8 @@
+     this.groupStyle = groupStyle;
+     this._isTabReserved = isTabReserved;
+     this._connection = connection;
++    this._connection.homeWindowId = selectedTab.windowId;
++    this._homeWindowId = selectedTab.windowId;
+     this._connection.onclose = () => this._onConnectionClose();
+     this._connection.ontabattached = (tabId: number) => this._onTabAttached(tabId);
+     this._connection.ontabdetached = (tabId: number) => this._onTabDetached(tabId);
+@@ -202,7 +208,8 @@
+     try {
+       await retryOnDrag(async () => {
+         if (this._groupId === null) {
+-          this._groupId = await chrome.tabs.group({ tabIds: [tabId] });
++          const createProperties = this._homeWindowId !== undefined ? { windowId: this._homeWindowId } : undefined;
++          this._groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties });
+           await chrome.tabGroups.update(this._groupId, this.groupStyle);
+         } else {
+           await chrome.tabs.group({ groupId: this._groupId, tabIds: [tabId] });
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream/packages/extension/src/quietBroker.ts quiet/src/quietBroker.ts
+--- a/src/quietBroker.ts
++++ b/src/quietBroker.ts
+@@ -0,0 +1,108 @@
++/**
++ * quiet fork (TR #2044): keep a WebSocket to the local /pw broker and open connect pages it hands
++ * us in UNFOCUSED windows. The stock flow has the MCP exec Chrome with --new-window <connect url>,
++ * which activates Chrome and steals the user's keyboard; chrome.windows.create({focused: false})
++ * never does (measured 2026-10-30). The broker lives in pmaxhogan/claude-shortcuts pw/broker.mjs.
++ *
++ * Routing: the broker sends the token from the connect URL; we open it only if it matches the
++ * token stored for this profile (mirrored into chrome.storage.local by authToken.tsx), so a Chrome
++ * with the fork in several profiles opens the page in exactly one of them. No stored token yet
++ * (fresh profile) means we decline and the broker's caller falls back to the stock exec path, which
++ * opens the WEB STORE extension's connect page, not ours: the fork only learns its token when its
++ * own status or connect page is opened once in that profile (setup step), and the MCP config must
++ * carry the fork's token, not the Web Store extension's.
++ */
++
++import { debugLog } from './relayConnection';
++
++const BROKER_URL = 'ws://127.0.0.1:47117/ext';
++const RECONNECT_ALARM = 'quiet-broker-reconnect';
++const DEFAULT_BOUNDS = { width: 1280, height: 900, left: 60, top: 60 };
++
++let socket: WebSocket | null = null;
++
++type OpenMessage = {
++  type: 'open';
++  id: string;
++  url: string;
++  token?: string;
++  minimized?: boolean;
++  bounds?: { width?: number; height?: number; left?: number; top?: number };
++};
++
++async function storedToken(): Promise<string | undefined> {
++  const { 'auth-token': token } = await chrome.storage.local.get('auth-token');
++  return typeof token === 'string' ? token : undefined;
++}
++
++function send(message: unknown): void {
++  if (socket && socket.readyState === WebSocket.OPEN)
++    socket.send(JSON.stringify(message));
++}
++
++async function hello(): Promise<void> {
++  send({ type: 'hello', extensionId: chrome.runtime.id, version: chrome.runtime.getManifest().version, token: await storedToken() });
++}
++
++async function handleOpen(message: OpenMessage): Promise<void> {
++  const token = await storedToken();
++  if (!token || (message.token && message.token !== token)) {
++    send({ type: 'declined', id: message.id, reason: token ? 'token mismatch' : 'no token stored in this profile yet' });
++    return;
++  }
++  // The MCP addresses the Web Store extension id; this fork has its own.
++  const url = new URL(message.url);
++  if (url.protocol === 'chrome-extension:')
++    url.host = chrome.runtime.id;
++  const bounds = { ...DEFAULT_BOUNDS, ...(message.bounds || {}) };
++  const win = await chrome.windows.create({ url: url.toString(), focused: false, type: 'normal', ...bounds });
++  if (!win)
++    throw new Error('chrome.windows.create returned no window');
++  if (message.minimized && win.id !== undefined)
++    await chrome.windows.update(win.id, { state: 'minimized' }).catch(() => {});
++  send({ type: 'opened', id: message.id, windowId: win.id, tabId: win.tabs?.[0]?.id });
++}
++
++function connect(): void {
++  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING))
++    return;
++  try {
++    socket = new WebSocket(BROKER_URL);
++  } catch (error) {
++    debugLog('quiet broker: cannot open socket', error);
++    return;
++  }
++  socket.onopen = () => void hello();
++  socket.onmessage = event => {
++    let message: any;
++    try {
++      message = JSON.parse(event.data);
++    } catch {
++      return;
++    }
++    if (message.type === 'ping')
++      send({ type: 'pong' });
++    else if (message.type === 'open')
++      handleOpen(message as OpenMessage).catch(error => send({ type: 'declined', id: message.id, reason: String(error?.message || error) }));
++  };
++  socket.onclose = () => {
++    socket = null;
++  };
++  socket.onerror = () => {};
++}
++
++export function startQuietBroker(): void {
++  connect();
++  // The broker may not be running yet (it starts with the first /pw connect); keep trying. The
++  // alarm also wakes the service worker if Chrome put it to sleep.
++  chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: 0.5 });
++  chrome.alarms.onAlarm.addListener(alarm => {
++    if (alarm.name === RECONNECT_ALARM)
++      connect();
++  });
++  chrome.runtime.onStartup.addListener(connect);
++  chrome.storage.onChanged.addListener((changes, area) => {
++    if (area === 'local' && changes['auth-token'])
++      void hello();
++  });
++}
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream/packages/extension/src/relayConnection.ts quiet/src/relayConnection.ts
+--- a/src/relayConnection.ts
++++ b/src/relayConnection.ts
+@@ -72,6 +72,9 @@
+   onclose?: () => void;
+   ontabattached?: (tabId: number) => void;
+   ontabdetached?: (tabId: number) => void;
++  // quiet fork: the window the client's first tab lived in. chrome.tabs.create without a windowId
++  // lands ACTIVE in the user's last-focused window; aim it at the client's own window instead.
++  homeWindowId?: number;
+ 
+   get attachedTabs(): ReadonlySet<number> {
+     return this._attachedTabs;
+@@ -279,8 +282,19 @@
+   private async _handleCommand(message: ProtocolCommand): Promise<any> {
+     if (!ALLOWED_CHROME_COMMANDS.has(message.method))
+       throw new Error(`Unknown method: ${message.method}`);
+-    const args = (message.params ?? []) as any[];
+-    const result = await invokeChromeMethod(message.method, args);
++    let args = (message.params ?? []) as any[];
++    if (message.method === 'chrome.tabs.create' && this.homeWindowId !== undefined && args[0] && args[0].windowId === undefined)
++      args = [{ ...args[0], windowId: this.homeWindowId, active: true }];
++    let result: any;
++    try {
++      result = await invokeChromeMethod(message.method, args);
++    } catch (error: any) {
++      // The home window may be gone; fall back to Chrome's default placement.
++      if (message.method === 'chrome.tabs.create' && args !== message.params)
++        result = await invokeChromeMethod(message.method, (message.params ?? []) as any[]);
++      else
++        throw error;
++    }
+     // Attach bookkeeping; detach flows through the chrome.debugger.onDetach event.
+     if (message.method === 'chrome.debugger.attach') {
+       const target = args[0] as chrome.debugger.Debuggee | undefined;
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore pw-upstream/packages/extension/src/ui/authToken.tsx quiet/src/ui/authToken.tsx
+--- a/src/ui/authToken.tsx
++++ b/src/ui/authToken.tsx
+@@ -25,6 +25,7 @@
+   const onRegenerateToken = useCallback(() => {
+     const newToken = generateAuthToken();
+     localStorage.setItem('auth-token', newToken);
++    void chrome.storage.local.set({ 'auth-token': newToken });
+     setAuthToken(newToken);
+   }, []);
+ 
+@@ -68,5 +69,8 @@
+     token = generateAuthToken();
+     localStorage.setItem('auth-token', token);
+   }
++  // quiet fork: mirror the token where the service worker can read it, so the broker can route a
++  // connect to the profile whose token it carries.
++  void chrome.storage.local.set({ 'auth-token': token });
+   return token;
+ };

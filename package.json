@@ -1,0 +1,17 @@
+{
+  "name": "playwright-extension-quiet",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Fork of Microsoft's Playwright Chrome extension that never steals keyboard focus",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "scripts/build.sh",
+    "sync": "scripts/sync-upstream.sh",
+    "check-ascii": "git ls-files -z | grep -zv '\\.png$' | xargs -0 grep -nP '[^\\x00-\\x7F]' -- 2>/dev/null | grep -v '^upstream/' && exit 1 || true"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.2.0", "@types/react": "19.2.17", "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.3", "react": "19.2.7", "react-dom": "19.2.7",
+    "typescript": "6.0.3", "vite": "8.1.6", "vite-plugin-static-copy": "3.4.0"
+  }
+}

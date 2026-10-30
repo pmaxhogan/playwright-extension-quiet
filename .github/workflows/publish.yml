@@ -1,0 +1,84 @@
+name: Publish
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "upstream/**"
+      - "patches/**"
+      - "scripts/**"
+      - "VERSION_SUFFIX"
+      - "package.json"
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build and publish (the sync workflow passes main)
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EXTENSION_ID: ${{ secrets.CWS_EXTENSION_ID }}
+      CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+      CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+      REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check-ascii
+      - run: scripts/build.sh
+
+      - name: Resolve version and check for an existing release
+        id: ver
+        run: |
+          version="$(node -p 'require("./dist/manifest.json").version')"
+          zip="$(ls playwright-extension-quiet-*.zip)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+            echo "::notice::Tag v$version already exists; this version was already published. Nothing to do."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload to the Chrome Web Store
+        if: steps.ver.outputs.exists == 'false'
+        run: |
+          if [ -z "$EXTENSION_ID" ] || [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ] || [ -z "$REFRESH_TOKEN" ]; then
+            echo "::notice::CWS_* secrets are not all set; skipping the Chrome Web Store upload."
+            exit 0
+          fi
+          npx --yes chrome-webstore-upload-cli@3 upload \
+            --source "${{ steps.ver.outputs.zip }}" \
+            --extension-id "$EXTENSION_ID" \
+            --client-id "$CLIENT_ID" \
+            --client-secret "$CLIENT_SECRET" \
+            --refresh-token "$REFRESH_TOKEN" \
+            --auto-publish
+
+      - name: Create GitHub release
+        if: steps.ver.outputs.exists == 'false'
+        run: |
+          v="v${{ steps.ver.outputs.version }}"
+          gh release create "$v" "${{ steps.ver.outputs.zip }}" \
+            --target "$(git rev-parse HEAD)" \
+            --title "$v" \
+            --notes "Upstream $(cat UPSTREAM_SHA). Built from $(git rev-parse --short HEAD)."

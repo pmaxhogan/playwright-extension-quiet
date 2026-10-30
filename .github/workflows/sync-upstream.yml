@@ -1,0 +1,97 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    outputs:
+      pushed: ${{ steps.commit.outputs.pushed }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Sync upstream
+        id: sync
+        shell: bash
+        run: |
+          old_version="$(node -p 'require("./upstream/manifest.json").version')"
+          out="$(scripts/sync-upstream.sh | tail -n 1)"
+          echo "$out"
+          echo "status=${out%% *}" >> "$GITHUB_OUTPUT"
+          echo "sha=${out##* }" >> "$GITHUB_OUTPUT"
+          echo "old_version=$old_version" >> "$GITHUB_OUTPUT"
+
+      - name: Build against new upstream
+        id: build
+        if: steps.sync.outputs.status == 'changed'
+        shell: bash
+        run: |
+          scripts/build.sh 2>&1 | tee build.log
+
+      - name: Report failed sync
+        if: failure() && steps.build.outcome == 'failure'
+        run: |
+          title="Upstream sync failed: patches no longer apply"
+          sha="${{ steps.sync.outputs.sha }}"
+          {
+            echo "Upstream sha: \`$sha\`"
+            echo "Failing step: Build against new upstream (scripts/build.sh)"
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Last 60 lines of the log:"
+            echo '```'
+            tail -n 60 build.log
+            echo '```'
+          } > issue-body.md
+          existing="$(gh issue list --state open --search "\"$title\" in:title" --json number,title --jq "[.[] | select(.title == \"$title\")][0].number // empty")"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file issue-body.md
+          else
+            gh issue create --title "$title" --body-file issue-body.md
+          fi
+
+      - name: Bump version suffix and commit
+        id: commit
+        if: steps.sync.outputs.status == 'changed'
+        run: |
+          new_version="$(node -p 'require("./upstream/manifest.json").version')"
+          if [ "$new_version" = "${{ steps.sync.outputs.old_version }}" ]; then
+            echo $(( $(cat VERSION_SUFFIX) + 1 )) > VERSION_SUFFIX
+          else
+            echo 1 > VERSION_SUFFIX
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add upstream UPSTREAM_SHA VERSION_SUFFIX
+          git commit -m "chore: sync upstream to $(cut -c1-7 UPSTREAM_SHA)"
+          git push origin HEAD:main
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: sync
+    if: needs.sync.outputs.pushed == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      ref: main
+    secrets: inherit
