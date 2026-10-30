@@ -1,6 +1,6 @@
 # Chrome Web Store listing (unlisted)
 
-Drafted 2026-10-30 for the developer console item under pmaxhogan's account. Visibility:
+Drafted 2026-10-30 for the developer console item under pmaxhogan's account (item id djphaomahfdjobipmjingddpnnihknnk, uploaded as version 0.4.0.2, status Draft). Visibility:
 Unlisted. Everything below is pasted into the console by hand or by an agent; keep it in sync
 with the manifest.
 
