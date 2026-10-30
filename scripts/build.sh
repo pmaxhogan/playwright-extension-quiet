@@ -28,6 +28,7 @@ m.action.default_title = m.name;
 // the repo) so its id is stable: jiobfmhnaneikbfofhbdkklfgennkcmn. The Web Store REJECTS a
 // manifest with a key field ("key field is not allowed in manifest", measured 2026-10-30), so the
 // zip for the store is built without it and gets the id the store assigned on first upload.
+delete m.key; // upstream ships Microsoft's Web Store key; neither variant may keep it
 fs.writeFileSync("build/manifest.store.json", JSON.stringify(m, null, 2) + "\n");
 m.key = fs.readFileSync("pubkey.b64", "utf8").trim();
 fs.writeFileSync("build/manifest.json", JSON.stringify(m, null, 2) + "\n");
