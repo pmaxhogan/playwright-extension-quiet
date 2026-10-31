@@ -1,16 +1,13 @@
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/background.ts b/src/background.ts
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/background.ts b/src/background.ts
 --- a/src/background.ts	2026-10-31 10:11:52
-+++ b/src/background.ts	2026-10-31 10:13:07
-@@ -17,6 +17,7 @@
- import { debugLog } from './relayConnection';
++++ b/src/background.ts	2026-10-31 10:31:16
+@@ -18,4 +18,5 @@
  import { PendingConnections } from './pendingConnection';
  import { ConnectedTabGroup, cleanupStalePlaywrightGroups, isNonDebuggableUrl, ungroupTabs, uniqueGroupStyle } from './connectedTabGroup';
 +import { startQuietBroker } from './quietBroker';
  
  type PageMessage = {
-   type: 'connectionRequested';
-@@ -116,10 +117,9 @@
-       group.onclose = () => this._connections.delete(id);
+@@ -117,8 +118,7 @@
        this._connections.set(id, group);
  
 -      await Promise.all([
@@ -22,17 +19,14 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +      await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
  
        if (tab.id !== selectorTabId)
-         await chrome.tabs.remove(selectorTabId).catch(() => {});
-@@ -159,3 +159,4 @@
- }
+@@ -160,2 +160,3 @@
  
  new PlaywrightExtension();
 +startQuietBroker();
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/connectedTabGroup.ts b/src/connectedTabGroup.ts
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/connectedTabGroup.ts b/src/connectedTabGroup.ts
 --- a/src/connectedTabGroup.ts	2026-10-31 10:11:52
-+++ b/src/connectedTabGroup.ts	2026-10-31 10:13:07
-@@ -75,6 +75,10 @@
-   private _connection: RelayConnection;
++++ b/src/connectedTabGroup.ts	2026-10-31 10:31:16
+@@ -76,4 +76,8 @@
    private _isTabReserved: (tabId: number) => boolean;
    private _groupId: number | null = null;
 +  // quiet fork: chrome.tabs.group() without createProperties.windowId creates the group in the
@@ -41,18 +35,14 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +  private _homeWindowId: number | undefined;
    private _groupTabIds: Set<number> = new Set();
    private _onTabUpdatedListener: (tabId: number, changeInfo: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => void;
-   private _onTabRemovedListener: (tabId: number) => void;
-@@ -86,6 +90,8 @@
-     this.groupStyle = groupStyle;
+@@ -87,4 +91,6 @@
      this._isTabReserved = isTabReserved;
      this._connection = connection;
 +    this._connection.homeWindowId = selectedTab.windowId;
 +    this._homeWindowId = selectedTab.windowId;
      this._connection.onclose = () => this._onConnectionClose();
      this._connection.ontabattached = (tabId: number) => this._onTabAttached(tabId);
-     this._connection.ontabdetached = (tabId: number) => this._onTabDetached(tabId);
-@@ -202,7 +208,8 @@
-     try {
+@@ -203,5 +209,6 @@
        await retryOnDrag(async () => {
          if (this._groupId === null) {
 -          this._groupId = await chrome.tabs.group({ tabIds: [tabId] });
@@ -60,10 +50,9 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +          this._groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties });
            await chrome.tabGroups.update(this._groupId, this.groupStyle);
          } else {
-           await chrome.tabs.group({ groupId: this._groupId, tabIds: [tabId] });
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/quietBroker.ts b/src/quietBroker.ts
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/quietBroker.ts b/src/quietBroker.ts
 --- a/src/quietBroker.ts	1969-12-31 18:00:00
-+++ b/src/quietBroker.ts	2026-10-31 10:30:42
++++ b/src/quietBroker.ts	2026-10-31 10:31:16
 @@ -0,0 +1,129 @@
 +/**
 + * quiet fork (TR #2044): keep a WebSocket to the local /pw broker and open connect pages it hands
@@ -194,9 +183,9 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +      void hello();
 +  });
 +}
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/quietLog.ts b/src/quietLog.ts
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/quietLog.ts b/src/quietLog.ts
 --- a/src/quietLog.ts	1969-12-31 18:00:00
-+++ b/src/quietLog.ts	2026-10-31 10:30:24
++++ b/src/quietLog.ts	2026-10-31 10:31:16
 @@ -0,0 +1,27 @@
 +/**
 + * quiet fork (TR #2044): one-line diagnostics for why a /pw relay connection ended. Upstream closes
@@ -225,20 +214,17 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +    return chrome.storage.local.set({ 'quiet-log': ring.slice(-100) });
 +  }).catch(() => {});
 +}
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/relayConnection.ts b/src/relayConnection.ts
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/relayConnection.ts b/src/relayConnection.ts
 --- a/src/relayConnection.ts	2026-10-31 10:11:52
-+++ b/src/relayConnection.ts	2026-10-31 10:30:39
-@@ -14,6 +14,8 @@
-  * limitations under the License.
++++ b/src/relayConnection.ts	2026-10-31 10:31:16
+@@ -15,4 +15,6 @@
   */
  
 +import { quietLog } from './quietLog';
 +
  export function debugLog(...args: unknown[]): void {
    const enabled = true;
-   if (enabled) {
-@@ -72,6 +74,9 @@
-   onclose?: () => void;
+@@ -73,4 +75,7 @@
    ontabattached?: (tabId: number) => void;
    ontabdetached?: (tabId: number) => void;
 +  // quiet fork: the window the client's first tab lived in. chrome.tabs.create without a windowId
@@ -246,9 +232,7 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +  homeWindowId?: number;
  
    get attachedTabs(): ReadonlySet<number> {
-     return this._attachedTabs;
-@@ -81,7 +86,11 @@
-     this._ws = ws;
+@@ -82,5 +87,9 @@
      this._installEventForwarders();
      this._ws.onmessage = this._onMessage.bind(this);
 -    this._ws.onclose = () => this._onClose();
@@ -259,33 +243,25 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +    };
    }
  
-   // Signals the end of the initial-tab handshake — call after the initial
-@@ -93,6 +102,7 @@
-   }
+@@ -94,4 +103,5 @@
  
    close(message: string): void {
 +    quietLog(`relay closing: "${message}" attached=[${[...this._attachedTabs]}] pendingReattach=[${[...this._pendingReattach]}]`);
      this._ws.close(1000, message);
      // ws.onclose is called asynchronously, so we call it here to avoid forwarding
-     // CDP events to the closed connection.
-@@ -180,6 +190,7 @@
-     // chrome.debugger.onDetach is the single source of truth for detach bookkeeping.
+@@ -181,4 +191,5 @@
      if (fullMethod === 'chrome.debugger.onDetach') {
        const reason = args[1] as string | undefined;
 +      quietLog(`debugger detached tab=${tabId} reason=${reason} attachedBefore=[${[...this._attachedTabs]}]`);
        this._notifyTabDetached(tabId);
        if (reason === 'target_closed' && this._maybeScheduleReattach(tabId))
-         return;
-@@ -192,6 +203,7 @@
-       return false;
+@@ -193,4 +204,5 @@
      if (this._recentReattach.has(tabId)) {
        debugLog(`Not re-attaching tab ${tabId}: re-detached within ${REATTACH_COOLDOWN_MS}ms`);
 +      quietLog(`not re-attaching tab=${tabId}: re-detached within ${REATTACH_COOLDOWN_MS}ms`);
        return false;
      }
-     this._recentReattach.add(tabId);
-@@ -279,8 +291,19 @@
-   private async _handleCommand(message: ProtocolCommand): Promise<any> {
+@@ -280,6 +292,17 @@
      if (!ALLOWED_CHROME_COMMANDS.has(message.method))
        throw new Error(`Unknown method: ${message.method}`);
 -    const args = (message.params ?? []) as any[];
@@ -305,20 +281,16 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +    }
      // Attach bookkeeping; detach flows through the chrome.debugger.onDetach event.
      if (message.method === 'chrome.debugger.attach') {
-       const target = args[0] as chrome.debugger.Debuggee | undefined;
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/ui/authToken.tsx b/src/ui/authToken.tsx
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/ui/authToken.tsx b/src/ui/authToken.tsx
 --- a/src/ui/authToken.tsx	2026-10-31 10:11:52
-+++ b/src/ui/authToken.tsx	2026-10-31 10:13:07
-@@ -25,6 +25,7 @@
-   const onRegenerateToken = useCallback(() => {
++++ b/src/ui/authToken.tsx	2026-10-31 10:31:16
+@@ -26,4 +26,5 @@
      const newToken = generateAuthToken();
      localStorage.setItem('auth-token', newToken);
 +    void chrome.storage.local.set({ 'auth-token': newToken });
      setAuthToken(newToken);
    }, []);
- 
-@@ -68,5 +69,8 @@
-     token = generateAuthToken();
+@@ -69,4 +70,7 @@
      localStorage.setItem('auth-token', token);
    }
 +  // quiet fork: mirror the token where the service worker can read it, so the broker can route a
