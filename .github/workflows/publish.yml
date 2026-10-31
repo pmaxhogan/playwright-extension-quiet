@@ -61,23 +61,38 @@ jobs:
           fi
 
       - name: Upload to the Chrome Web Store
+        id: upload
         if: steps.ver.outputs.exists == 'false'
         run: |
           if [ -z "$EXTENSION_ID" ] || [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ] || [ -z "$REFRESH_TOKEN" ]; then
             echo "::notice::CWS_* secrets are not all set; skipping the Chrome Web Store upload."
             exit 0
           fi
-          npx --yes chrome-webstore-upload-cli@3 upload \
+          set +e
+          out="$(npx --yes chrome-webstore-upload-cli@3 upload \
             --source "${{ steps.ver.outputs.zip }}" \
             --extension-id "$EXTENSION_ID" \
             --client-id "$CLIENT_ID" \
             --client-secret "$CLIENT_SECRET" \
-            --refresh-token "$REFRESH_TOKEN"
-          # Upload only: no --auto-publish. The CWS item stays a draft until its owner submits it
-          # by hand in the dashboard (the submit-for-review card was rejected 2026-10-30).
+            --refresh-token "$REFRESH_TOKEN" \
+            --auto-publish 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            # The item is pending review (or ready to publish): the store refuses an update until
+            # that resolves. That is expected, not a failure - skip cleanly, create no release/tag,
+            # and the next sync retries this same version. Any other error still fails the run.
+            if printf '%s' "$out" | grep -q 'ITEM_NOT_UPDATABLE'; then
+              echo "::notice::Chrome Web Store item is pending review; upload skipped, the next run retries."
+              echo "skipped=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            exit "$rc"
+          fi
 
       - name: Create GitHub release
-        if: steps.ver.outputs.exists == 'false'
+        if: steps.ver.outputs.exists == 'false' && steps.upload.outputs.skipped != 'true'
         run: |
           v="v${{ steps.ver.outputs.version }}"
           gh release create "$v" "${{ steps.ver.outputs.zip }}" \

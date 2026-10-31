@@ -1,6 +1,6 @@
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/background.ts build/src/background.ts
---- a/src/background.ts	2026-10-30 15:09:30
-+++ b/src/background.ts	2026-10-30 15:21:16
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/background.ts b/src/background.ts
+--- a/src/background.ts	2026-10-31 10:11:52
++++ b/src/background.ts	2026-10-31 10:13:07
 @@ -17,6 +17,7 @@
  import { debugLog } from './relayConnection';
  import { PendingConnections } from './pendingConnection';
@@ -28,9 +28,9 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
  
  new PlaywrightExtension();
 +startQuietBroker();
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/connectedTabGroup.ts build/src/connectedTabGroup.ts
---- a/src/connectedTabGroup.ts	2026-10-30 15:09:30
-+++ b/src/connectedTabGroup.ts	2026-10-30 15:21:16
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/connectedTabGroup.ts b/src/connectedTabGroup.ts
+--- a/src/connectedTabGroup.ts	2026-10-31 10:11:52
++++ b/src/connectedTabGroup.ts	2026-10-31 10:13:07
 @@ -75,6 +75,10 @@
    private _connection: RelayConnection;
    private _isTabReserved: (tabId: number) => boolean;
@@ -61,10 +61,10 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
            await chrome.tabGroups.update(this._groupId, this.groupStyle);
          } else {
            await chrome.tabs.group({ groupId: this._groupId, tabIds: [tabId] });
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/quietBroker.ts build/src/quietBroker.ts
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/quietBroker.ts b/src/quietBroker.ts
 --- a/src/quietBroker.ts	1969-12-31 18:00:00
-+++ b/src/quietBroker.ts	2026-10-30 15:30:07
-@@ -0,0 +1,126 @@
++++ b/src/quietBroker.ts	2026-10-31 10:30:42
+@@ -0,0 +1,129 @@
 +/**
 + * quiet fork (TR #2044): keep a WebSocket to the local /pw broker and open connect pages it hands
 + * us in UNFOCUSED windows. The stock flow has the MCP exec Chrome with --new-window <connect url>,
@@ -81,6 +81,7 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 + */
 +
 +import { debugLog } from './relayConnection';
++import { setQuietLogSink } from './quietLog';
 +
 +const BROKER_URL = 'ws://127.0.0.1:47117/ext';
 +const RECONNECT_ALARM = 'quiet-broker-reconnect';
@@ -177,6 +178,8 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +}
 +
 +export function startQuietBroker(): void {
++  // Relay close / detach reasons (quietLog.ts) go to the broker's log as `ext <line>`.
++  setQuietLogSink(line => send({ type: 'log', line }));
 +  connect();
 +  // The broker may not be running yet (it starts with the first /pw connect); keep trying. The
 +  // alarm also wakes the service worker if Chrome put it to sleep.
@@ -191,10 +194,50 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +      void hello();
 +  });
 +}
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/relayConnection.ts build/src/relayConnection.ts
---- a/src/relayConnection.ts	2026-10-30 15:09:30
-+++ b/src/relayConnection.ts	2026-10-30 15:21:16
-@@ -72,6 +72,9 @@
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/quietLog.ts b/src/quietLog.ts
+--- a/src/quietLog.ts	1969-12-31 18:00:00
++++ b/src/quietLog.ts	2026-10-31 10:30:24
+@@ -0,0 +1,27 @@
++/**
++ * quiet fork (TR #2044): one-line diagnostics for why a /pw relay connection ended. Upstream closes
++ * the whole connection silently ("All controlled tabs detached", a peer-closed websocket) and an
++ * MV3 service worker keeps no console history, so a dropped session left no trace of its cause.
++ * Each line goes to the local broker (pw/broker.mjs logs it as `ext <line>` in broker.log) and to a
++ * 100-entry ring in chrome.storage.local under 'quiet-log'.
++ */
++
++let sink: ((line: string) => void) | undefined;
++
++export function setQuietLogSink(fn: (line: string) => void): void {
++  sink = fn;
++}
++
++export function quietLog(line: string): void {
++  const entry = `${new Date().toISOString()} ${line}`;
++  try {
++    sink?.(entry);
++  } catch {
++    // diagnostics must never break the relay
++  }
++  chrome.storage.local.get('quiet-log').then(stored => {
++    const ring: string[] = Array.isArray(stored['quiet-log']) ? stored['quiet-log'] : [];
++    ring.push(entry);
++    return chrome.storage.local.set({ 'quiet-log': ring.slice(-100) });
++  }).catch(() => {});
++}
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/relayConnection.ts b/src/relayConnection.ts
+--- a/src/relayConnection.ts	2026-10-31 10:11:52
++++ b/src/relayConnection.ts	2026-10-31 10:30:39
+@@ -14,6 +14,8 @@
+  * limitations under the License.
+  */
+ 
++import { quietLog } from './quietLog';
++
+ export function debugLog(...args: unknown[]): void {
+   const enabled = true;
+   if (enabled) {
+@@ -72,6 +74,9 @@
    onclose?: () => void;
    ontabattached?: (tabId: number) => void;
    ontabdetached?: (tabId: number) => void;
@@ -204,7 +247,44 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
  
    get attachedTabs(): ReadonlySet<number> {
      return this._attachedTabs;
-@@ -279,8 +282,19 @@
+@@ -81,7 +86,11 @@
+     this._ws = ws;
+     this._installEventForwarders();
+     this._ws.onmessage = this._onMessage.bind(this);
+-    this._ws.onclose = () => this._onClose();
++    this._ws.onclose = event => {
++      // quiet fork: say who ended the connection (the MCP side closing its websocket).
++      quietLog(`relay ws closed by peer code=${event.code} reason="${event.reason}" attached=[${[...this._attachedTabs]}]`);
++      this._onClose();
++    };
+   }
+ 
+   // Signals the end of the initial-tab handshake — call after the initial
+@@ -93,6 +102,7 @@
+   }
+ 
+   close(message: string): void {
++    quietLog(`relay closing: "${message}" attached=[${[...this._attachedTabs]}] pendingReattach=[${[...this._pendingReattach]}]`);
+     this._ws.close(1000, message);
+     // ws.onclose is called asynchronously, so we call it here to avoid forwarding
+     // CDP events to the closed connection.
+@@ -180,6 +190,7 @@
+     // chrome.debugger.onDetach is the single source of truth for detach bookkeeping.
+     if (fullMethod === 'chrome.debugger.onDetach') {
+       const reason = args[1] as string | undefined;
++      quietLog(`debugger detached tab=${tabId} reason=${reason} attachedBefore=[${[...this._attachedTabs]}]`);
+       this._notifyTabDetached(tabId);
+       if (reason === 'target_closed' && this._maybeScheduleReattach(tabId))
+         return;
+@@ -192,6 +203,7 @@
+       return false;
+     if (this._recentReattach.has(tabId)) {
+       debugLog(`Not re-attaching tab ${tabId}: re-detached within ${REATTACH_COOLDOWN_MS}ms`);
++      quietLog(`not re-attaching tab=${tabId}: re-detached within ${REATTACH_COOLDOWN_MS}ms`);
+       return false;
+     }
+     this._recentReattach.add(tabId);
+@@ -279,8 +291,19 @@
    private async _handleCommand(message: ProtocolCommand): Promise<any> {
      if (!ALLOWED_CHROME_COMMANDS.has(message.method))
        throw new Error(`Unknown method: ${message.method}`);
@@ -226,9 +306,9 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
      // Attach bookkeeping; detach flows through the chrome.debugger.onDetach event.
      if (message.method === 'chrome.debugger.attach') {
        const target = args[0] as chrome.debugger.Debuggee | undefined;
-diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/ui/authToken.tsx build/src/ui/authToken.tsx
---- a/src/ui/authToken.tsx	2026-10-30 15:09:30
-+++ b/src/ui/authToken.tsx	2026-10-30 15:21:16
+diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/ui/authToken.tsx b/src/ui/authToken.tsx
+--- a/src/ui/authToken.tsx	2026-10-31 10:11:52
++++ b/src/ui/authToken.tsx	2026-10-31 10:13:07
 @@ -25,6 +25,7 @@
    const onRegenerateToken = useCallback(() => {
      const newToken = generateAuthToken();

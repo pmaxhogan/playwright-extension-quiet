@@ -93,9 +93,10 @@ This project is not affiliated with or endorsed by Microsoft.
 - Publisher OAuth: Google Cloud project `pwq-publisher` (personal account), Desktop client
   `pwq-publisher-ci`, Chrome Web Store API enabled, OAuth app published to production (a Testing
   app's refresh tokens expire after 7 days). The four `CWS_*` Actions secrets are set; the
-  `Publish` workflow uploads every new version from main as a draft and never submits it
-  (no `--auto-publish`, 2026-10-31); submitting for review stays a human step in the dashboard.
-  An upload fails with `ITEM_NOT_UPDATABLE` while the item is in pending review.
+  `Publish` workflow uploads and auto-publishes every new version from main (the owner wants
+  this; the item was submitted for review 2026-10-30). While the item is pending review the store
+  answers `ITEM_NOT_UPDATABLE`: the workflow treats exactly that as a clean skip (notice, no
+  release or tag) so the next sync retries the same version; any other upload error fails the run.
 - Re-minting the refresh token: open the consent URL from the chrome-webstore-upload guide with
   `redirect_uri=http://localhost:8818`, catch the code with a one-shot local listener, exchange it
   at `https://oauth2.googleapis.com/token`, then `gh secret set CWS_REFRESH_TOKEN`.
