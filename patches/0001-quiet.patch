@@ -64,7 +64,7 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x package.json upstream/src/quietBroker.ts build/src/quietBroker.ts
 --- a/src/quietBroker.ts	1969-12-31 18:00:00
 +++ b/src/quietBroker.ts	2026-10-30 15:30:07
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,126 @@
 +/**
 + * quiet fork (TR #2044): keep a WebSocket to the local /pw broker and open connect pages it hands
 + * us in UNFOCUSED windows. The stock flow has the MCP exec Chrome with --new-window <connect url>,
@@ -95,14 +95,16 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +  token?: string;
 +  minimized?: boolean;
 +  bounds?: { width?: number; height?: number; left?: number; top?: number };
-+  // Agent name: shown as a pinned first tab so the window is identifiable at a glance.
++  // Agent name: shown on an unpinned first tab (Claude Code icon) so the window is identifiable.
 +  name?: string;
 +};
 +
++// The title tab is an extension page (static/title.html, copied into dist/ by scripts/build.sh).
++// A data: page gets no favicon in Chrome (measured 2026-10-31: favIconUrl stays null); an
++// extension page does. getURL() yields whichever id is running, unpacked or Web Store. The page
++// writes ?name= with textContent only, so a hostile name cannot inject markup.
 +function titleTabUrl(name: string): string {
-+  const safe = name.replace(/[<>&"]/g, '');
-+  const html = `<!doctype html><title>${safe}</title><meta charset="utf-8"><body style="margin:0;font:16px -apple-system,sans-serif;background:#1f2937;color:#f9fafb;display:flex;align-items:center;justify-content:center;height:100vh"><div style="text-align:center"><div style="font-size:12px;letter-spacing:.2em;opacity:.7">AGENT WINDOW</div><div style="font-size:40px;font-weight:700;margin:12px 0">${safe}</div><div style="opacity:.7">Driven by a Claude Code session. You can click into any tab here and type; the agent keeps working.</div></div></body>`;
-+  return 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
++  return chrome.runtime.getURL('title.html') + '?name=' + encodeURIComponent(name);
 +}
 +
 +async function storedToken(): Promise<string | undefined> {
@@ -136,7 +138,7 @@ diff -ruN -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest
 +  let titleTab: string | number | undefined;
 +  if (message.name && win.id !== undefined) {
 +    try {
-+      titleTab = (await chrome.tabs.create({ windowId: win.id, url: titleTabUrl(message.name), pinned: true, index: 0, active: false })).id;
++      titleTab = (await chrome.tabs.create({ windowId: win.id, url: titleTabUrl(message.name), pinned: false, index: 0, active: false })).id;
 +    } catch (error: any) {
 +      titleTab = 'error: ' + (error?.message || error);
 +    }

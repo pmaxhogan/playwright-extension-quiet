@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent window</title>
+<link rel="icon" type="image/png" sizes="192x192" href="claude-code.png">
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; align-items: center; justify-content: center; font: 16px -apple-system, BlinkMacSystemFont, sans-serif; background: #1f2937; color: #f9fafb; }
+  .box { text-align: center; padding: 0 24px; }
+  .label { font-size: 12px; letter-spacing: .2em; opacity: .7; }
+  .name { font-size: 40px; font-weight: 700; margin: 12px 0; overflow-wrap: anywhere; }
+  .hint { opacity: .7; }
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="label">AGENT WINDOW</div>
+  <div class="name" id="name"></div>
+  <div class="hint">Driven by a Claude Code session. You can click into any tab here and type; the agent keeps working.</div>
+</div>
+<script src="title.js"></script>
+</body>
+</html>

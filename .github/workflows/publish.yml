@@ -7,6 +7,7 @@ on:
       - "upstream/**"
       - "patches/**"
       - "scripts/**"
+      - "static/**"
       - "VERSION_SUFFIX"
       - "package.json"
   workflow_dispatch:
@@ -71,8 +72,9 @@ jobs:
             --extension-id "$EXTENSION_ID" \
             --client-id "$CLIENT_ID" \
             --client-secret "$CLIENT_SECRET" \
-            --refresh-token "$REFRESH_TOKEN" \
-            --auto-publish
+            --refresh-token "$REFRESH_TOKEN"
+          # Upload only: no --auto-publish. The CWS item stays a draft until its owner submits it
+          # by hand in the dashboard (the submit-for-review card was rejected 2026-10-30).
 
       - name: Create GitHub release
         if: steps.ver.outputs.exists == 'false'

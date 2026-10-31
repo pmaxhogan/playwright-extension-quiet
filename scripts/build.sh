@@ -42,6 +42,9 @@ JS
 ln -sfn ../node_modules build/node_modules
 (cd build && npx tsc -p tsconfig.json && npx tsc -p tsconfig.ui.json && npx vite build >/dev/null)
 mv build/dist dist
+# Fork-owned static pages (the agent-window title tab: title.html + title.js + the Claude Code icon).
+# Plain files, not run through vite, so upstream's build config stays untouched.
+cp static/* dist/
 version="$(node -p 'require("./dist/manifest.json").version')"
 rm -rf dist-store && cp -R dist dist-store && cp build/manifest.store.json dist-store/manifest.json
 rm -f playwright-extension-quiet-*.zip
