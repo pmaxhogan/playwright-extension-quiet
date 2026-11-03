@@ -7,13 +7,15 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +import { startQuietBroker } from './quietBroker';
  
  type PageMessage = {
-@@ -117,8 +118,7 @@
+@@ -120,10 +121,7 @@
        this._connections.set(id, group);
  
--      await Promise.all([
--        chrome.tabs.update(tab.id, { active: true }),
--        chrome.windows.update(tab.windowId, { focused: true }),
--      ]).catch(() => {});
+-      if (!background) {
+-        await Promise.all([
+-          chrome.tabs.update(tab.id, { active: true }),
+-          chrome.windows.update(tab.windowId, { focused: true }),
+-        ]).catch(() => {});
+-      }
 +      // quiet fork: activate the tab inside its own window, but never focus the window - that
 +      // activates Chrome and steals the user's keyboard (TR #2044).
 +      await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
