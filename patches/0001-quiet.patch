@@ -1,7 +1,7 @@
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/agentsApp.ts b/src/agentsApp.ts
 --- a/src/agentsApp.ts	1969-12-31 18:00:00
-+++ b/src/agentsApp.ts	2026-11-05 14:04:54
-@@ -0,0 +1,250 @@
++++ b/src/agentsApp.ts	2026-11-05 14:10:48
+@@ -0,0 +1,259 @@
 +/**
 + * quiet fork: agent windows as app windows of the "Agents" PWA.
 + *
@@ -209,6 +209,12 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +const activeTabs = new Map<number, [number, number | undefined]>();
 +
 +export function installBackstop(relayForTab: RelayLookup): void {
++  void chrome.tabs.query({ active: true }).then(tabs => {
++    for (const t of tabs) {
++      if (t.id !== undefined && t.windowId !== undefined && !activeTabs.has(t.windowId))
++        activeTabs.set(t.windowId, [t.id, undefined]);
++    }
++  });
 +  chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
 +    const prev = activeTabs.get(windowId);
 +    activeTabs.set(windowId, [tabId, prev?.[0]]);
@@ -242,12 +248,15 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +  if (!landed || landed.type !== 'normal')
 +    return;
 +  const url = tab.pendingUrl || tab.url || (await waitForTab(t => t.id === tab.id && !!(t.pendingUrl || t.url), 3000))?.url;
-+  const before = activeTabs.get(tab.windowId);
++  // The tab the user's window showed before the stray. onActivated for the stray may fire before
++  // or after this point, so take whichever recorded tab is not the stray itself.
++  const seen = activeTabs.get(tab.windowId);
++  const userTab = seen ? (seen[0] !== tab.id ? seen[0] : seen[1]) : undefined;
 +  const moved = await duplicateInto(opener.windowId, url, true);
 +  await chrome.tabs.remove(tab.id).catch(() => {});
-+  // Give the user's window back the tab it was showing.
-+  if (before && before[0] === tab.id && before[1] !== undefined)
-+    await chrome.tabs.update(before[1], { active: true }).catch(() => {});
++  // Give the user's window back the tab it was showing (removing the stray lets Chrome pick one).
++  if (userTab !== undefined)
++    await chrome.tabs.update(userTab, { active: true }).catch(() => {});
 +  quietLog(`backstop moved tab ${tab.id} (${(url || '').slice(0, 60)}) from window ${tab.windowId} into agent window ${opener.windowId} as tab ${moved.id}`);
 +  relayForTab(opener.id!)?.attachTab(moved);
 +  debugLog('agents backstop moved', tab.id, '->', moved.id);
