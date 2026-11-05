@@ -1,13 +1,297 @@
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/agentsApp.ts b/src/agentsApp.ts
+--- a/src/agentsApp.ts	1969-12-31 18:00:00
++++ b/src/agentsApp.ts	2026-11-05 14:56:35
+@@ -0,0 +1,279 @@
++/**
++ * quiet fork: agent windows as app windows of the "Agents" PWA.
++ *
++ * uBar (and the Dock) group windows by the PROCESS that owns them. Every normal Chrome window is
++ * owned by Chrome itself, so agent windows stacked with the user's own. An installed PWA's windows
++ * are owned by its macOS app shim, so they get their own bar item, while the pages still run in the
++ * same profile with its live logins (measured 2026-11-05). The broker (claude-shortcuts
++ * pw/broker.mjs + pw/agents-app.mjs) serves the app at AGENTS_URL; the user installs it once.
++ *
++ * Chrome rules this works around (all measured 2026-11-05 on Chrome 157, tabbed-PWA flags on):
++ * - chrome.tabs.create({windowId: <app window>}) lands in the user's last-used NORMAL window, and
++ *   chrome.tabs.move refuses app windows ("Tabs can only be moved to and from normal windows").
++ *   chrome.tabs.duplicate of a tab in the app window stays in it, and the duplicate can then be
++ *   navigated anywhere (out of the app's scope too) - so every agent tab is a duplicate.
++ * - A new app window comes from window.open(<in-scope url>) run in an existing app tab with a user
++ *   gesture (chrome.debugger Runtime.evaluate userGesture); a freshly launched app's start window
++ *   is used directly.
++ * - window.open / target=_blank from an app tab to another site opens a tab in the user's normal
++ *   window. pw/keep-tab-visible.cjs routes those through Playwright first; installBackstop() below
++ *   moves any that still land outside (sized popups, e.g. OAuth sign-in, are left alone so
++ *   window.opener keeps working).
++ */
++
++import { debugLog } from './relayConnection';
++import { quietLog } from './quietLog';
++
++export const AGENTS_ORIGIN = 'http://127.0.0.1:47117';
++export const AGENTS_URL = AGENTS_ORIGIN + '/agents/';
++const CLAIMED_KEY = 'agents-claimed-windows';
++
++export class AgentsAppNotRunning extends Error {
++  constructor() {
++    super('agents-app-not-running');
++  }
++}
++
++export function isAgentsUrl(url: string | undefined): boolean {
++  return !!url && url.startsWith(AGENTS_URL);
++}
++
++function titleUrl(name: string | undefined, claim?: string): string {
++  const u = new URL(AGENTS_URL);
++  if (name)
++    u.searchParams.set('name', name);
++  if (claim)
++    u.searchParams.set('claim', claim);
++  return u.toString();
++}
++
++// ---- claimed windows: windowId -> agent name (session storage survives service worker restarts)
++let claimed: Map<number, string> | null = null;
++
++async function claimedWindows(): Promise<Map<number, string>> {
++  if (!claimed) {
++    const stored = (await chrome.storage.session.get(CLAIMED_KEY).catch(() => ({})) as any)[CLAIMED_KEY] || {};
++    claimed = new Map(Object.entries(stored).map(([k, v]) => [Number(k), String(v)]));
++  }
++  return claimed;
++}
++
++async function saveClaimed(): Promise<void> {
++  const map = await claimedWindows();
++  await chrome.storage.session.set({ [CLAIMED_KEY]: Object.fromEntries(map) }).catch(() => {});
++}
++
++export async function isAgentWindow(windowId: number | undefined): Promise<boolean> {
++  return windowId !== undefined && (await claimedWindows()).has(windowId);
++}
++
++// ---- registry sink (the broker's /agents/windows, read by agent-border.swift)
++let reportSink: ((message: unknown) => void) | null = null;
++
++export function setAgentWindowSink(sink: (message: unknown) => void): void {
++  reportSink = sink;
++}
++
++async function report(windowId: number, closed = false): Promise<void> {
++  if (!reportSink)
++    return;
++  if (closed) {
++    reportSink({ type: 'agent-window', windowId, closed: true });
++    return;
++  }
++  const name = (await claimedWindows()).get(windowId);
++  const win = await chrome.windows.get(windowId).catch(() => undefined);
++  if (!win)
++    return;
++  reportSink({ type: 'agent-window', windowId, name, bounds: { left: win.left, top: win.top, width: win.width, height: win.height } });
++}
++
++export async function reportAllAgentWindows(): Promise<void> {
++  for (const id of (await claimedWindows()).keys())
++    await report(id);
++}
++
++// ---- helpers
++async function appWindows(): Promise<chrome.windows.Window[]> {
++  return chrome.windows.getAll({ populate: true, windowTypes: ['app'] });
++}
++
++function agentsTabs(win: chrome.windows.Window): chrome.tabs.Tab[] {
++  return (win.tabs || []).filter(t => isAgentsUrl(t.url) || isAgentsUrl(t.pendingUrl));
++}
++
++function waitForTab(predicate: (tab: chrome.tabs.Tab) => boolean, timeoutMs: number): Promise<chrome.tabs.Tab | undefined> {
++  return new Promise(resolve => {
++    const done = (tab: chrome.tabs.Tab | undefined) => {
++      clearTimeout(timer);
++      chrome.tabs.onCreated.removeListener(onCreated);
++      chrome.tabs.onUpdated.removeListener(onUpdated);
++      resolve(tab);
++    };
++    const onCreated = (tab: chrome.tabs.Tab) => {
++      if (predicate(tab))
++        done(tab);
++    };
++    const onUpdated = (_id: number, _change: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => {
++      if (predicate(tab))
++        done(tab);
++    };
++    const timer = setTimeout(() => done(undefined), timeoutMs);
++    chrome.tabs.onCreated.addListener(onCreated);
++    chrome.tabs.onUpdated.addListener(onUpdated);
++  });
++}
++
++// A tab in an app window whose page we may script: our own Agents page, not driven by any agent.
++async function newAppWindowFrom(anchor: chrome.tabs.Tab, claim: string): Promise<chrome.windows.Window> {
++  const tabId = anchor.id!;
++  const url = titleUrl(undefined, claim);
++  const wait = waitForTab(t => (t.url || t.pendingUrl || '').includes('claim=' + claim), 5000);
++  await chrome.debugger.attach({ tabId }, '1.3');
++  try {
++    await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
++      expression: `void window.open(${JSON.stringify(url)}, '_blank')`,
++      userGesture: true,
++    });
++  } finally {
++    await chrome.debugger.detach({ tabId }).catch(() => {});
++  }
++  const tab = await wait;
++  if (!tab || tab.windowId === undefined)
++    throw new Error('window.open did not produce an app window');
++  const win = await chrome.windows.get(tab.windowId, { populate: true });
++  if (win.type !== 'app')
++    throw new Error(`window.open landed in a ${win.type} window, not an app window`);
++  return win;
++}
++
++/**
++ * Opens (or adopts) an Agents app window for one agent, puts the connect page in it, and returns
++ * the ids the broker reports. Throws AgentsAppNotRunning when no Agents app window exists at all;
++ * the caller (chrome-focus-guard.sh) then launches the app, whose start window this adopts.
++ */
++export async function openAgentWindow(connectUrl: string, name: string | undefined, bounds: { left?: number; top?: number; width?: number; height?: number }): Promise<{ windowId: number; tabId: number; titleTab: number }> {
++  const map = await claimedWindows();
++  // Forget windows that are gone.
++  for (const id of [...map.keys()]) {
++    if (!(await chrome.windows.get(id).catch(() => undefined))) {
++      map.delete(id);
++      void report(id, true);
++    }
++  }
++  const wins = (await appWindows()).filter(w => agentsTabs(w).length > 0);
++  if (!wins.length)
++    throw new AgentsAppNotRunning();
++  // An unclaimed window whose tabs are all Agents pages (a freshly launched app) is used as is.
++  let win = wins.find(w => w.id !== undefined && !map.has(w.id) && agentsTabs(w).length === (w.tabs || []).length);
++  if (!win) {
++    const anchor = wins.flatMap(agentsTabs)[0];
++    win = await newAppWindowFrom(anchor, crypto.randomUUID());
++  }
++  const windowId = win.id!;
++  map.set(windowId, name || '');
++  await saveClaimed();
++  const title = (win.tabs || [])[0];
++  await chrome.tabs.update(title.id!, { url: titleUrl(name) });
++  const connectTab = await duplicateInto(windowId, connectUrl, true);
++  await chrome.windows.update(windowId, { ...bounds, focused: false }).catch(() => {});
++  quietLog(`agents window ${windowId} for "${name || ''}": title tab ${title.id}, connect tab ${connectTab.id}`);
++  void report(windowId);
++  return { windowId, tabId: connectTab.id!, titleTab: title.id! };
++}
++
++/**
++ * A new tab in an agent app window, navigated to `url`. Duplicating the window's title tab is
++ * the only API path that keeps a new tab inside an app window.
++ */
++// Windows with a duplicateInto in flight. Chrome gives a duplicate the window's ACTIVE tab as its
++// opener, so when that tab is driven by Playwright the relay would forward the duplicate as a
++// popup, Playwright would attach it, and the caller's own attach then fails ("Another debugger is
++// already attached", measured 2026-11-05). relayConnection skips onCreated for these windows.
++const duplicating = new Map<number, number>();
++
++export function isDuplicating(windowId: number | undefined): boolean {
++  return windowId !== undefined && (duplicating.get(windowId) || 0) > 0;
++}
++
++export async function duplicateInto(windowId: number, url: string | undefined, active: boolean): Promise<chrome.tabs.Tab> {
++  duplicating.set(windowId, (duplicating.get(windowId) || 0) + 1);
++  try {
++    return await duplicateIntoInner(windowId, url, active);
++  } finally {
++    // onCreated is dispatched before duplicate() resolves; keep the flag a beat longer.
++    setTimeout(() => duplicating.set(windowId, Math.max(0, (duplicating.get(windowId) || 1) - 1)), 250);
++  }
++}
++
++async function duplicateIntoInner(windowId: number, url: string | undefined, active: boolean): Promise<chrome.tabs.Tab> {
++  const win = await chrome.windows.get(windowId, { populate: true });
++  const source = (win.tabs || []).find(t => isAgentsUrl(t.url) || isAgentsUrl(t.pendingUrl)) || (win.tabs || [])[0];
++  if (!source?.id)
++    throw new Error(`agent window ${windowId} has no tab to duplicate`);
++  const dup = await chrome.tabs.duplicate(source.id);
++  if (!dup?.id)
++    throw new Error('chrome.tabs.duplicate returned no tab');
++  await chrome.tabs.update(dup.id, { url: url || 'about:blank', active });
++  return chrome.tabs.get(dup.id);
++}
++
++// ---- backstop: page-opened tabs that still land outside the agent's window
++type RelayLookup = (tabId: number) => { attachTab(tab: chrome.tabs.Tab): void } | undefined;
++
++// windowId -> [current active tab, previous active tab], to give the user's window its tab back.
++const activeTabs = new Map<number, [number, number | undefined]>();
++
++export function installBackstop(relayForTab: RelayLookup): void {
++  void chrome.tabs.query({ active: true }).then(tabs => {
++    for (const t of tabs) {
++      if (t.id !== undefined && t.windowId !== undefined && !activeTabs.has(t.windowId))
++        activeTabs.set(t.windowId, [t.id, undefined]);
++    }
++  });
++  chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
++    const prev = activeTabs.get(windowId);
++    activeTabs.set(windowId, [tabId, prev?.[0]]);
++  });
++  chrome.windows.onRemoved.addListener(windowId => {
++    activeTabs.delete(windowId);
++    void claimedWindows().then(map => {
++      if (map.delete(windowId)) {
++        void saveClaimed();
++        void report(windowId, true);
++      }
++    });
++  });
++  chrome.windows.onBoundsChanged?.addListener(win => {
++    if (win.id !== undefined)
++      void isAgentWindow(win.id).then(yes => { if (yes) void report(win.id!); });
++  });
++  chrome.tabs.onCreated.addListener(tab => {
++    void rescue(tab, relayForTab).catch(error => quietLog(`backstop failed for tab ${tab.id}: ${error?.message || error}`));
++  });
++}
++
++async function rescue(tab: chrome.tabs.Tab, relayForTab: RelayLookup): Promise<void> {
++  if (tab.id === undefined || tab.openerTabId === undefined || tab.windowId === undefined)
++    return;
++  const opener = await chrome.tabs.get(tab.openerTabId).catch(() => undefined);
++  if (!opener || opener.windowId === tab.windowId || !(await isAgentWindow(opener.windowId)))
++    return;
++  const landed = await chrome.windows.get(tab.windowId).catch(() => undefined);
++  // Sized popups keep their own window and window.opener (sign-in flows report back through it).
++  if (!landed || landed.type !== 'normal')
++    return;
++  const url = tab.pendingUrl || tab.url || (await waitForTab(t => t.id === tab.id && !!(t.pendingUrl || t.url), 3000))?.url;
++  // The tab the user's window showed before the stray. onActivated for the stray may fire before
++  // or after this point, so take whichever recorded tab is not the stray itself.
++  const seen = activeTabs.get(tab.windowId);
++  const userTab = seen ? (seen[0] !== tab.id ? seen[0] : seen[1]) : undefined;
++  const moved = await duplicateInto(opener.windowId, url, true);
++  await chrome.tabs.remove(tab.id).catch(() => {});
++  // Give the user's window back the tab it was showing (removing the stray lets Chrome pick one).
++  if (userTab !== undefined)
++    await chrome.tabs.update(userTab, { active: true }).catch(() => {});
++  quietLog(`backstop moved tab ${tab.id} (${(url || '').slice(0, 60)}) from window ${tab.windowId} into agent window ${opener.windowId} as tab ${moved.id}`);
++  relayForTab(opener.id!)?.attachTab(moved);
++  debugLog('agents backstop moved', tab.id, '->', moved.id);
++}
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/background.ts b/src/background.ts
---- a/src/background.ts	2026-10-31 10:11:52
-+++ b/src/background.ts	2026-10-31 10:31:16
-@@ -18,4 +18,5 @@
+--- a/src/background.ts	2026-11-05 14:03:21
++++ b/src/background.ts	2026-11-05 14:04:29
+@@ -18,4 +18,6 @@
  import { PendingConnections } from './pendingConnection';
  import { ConnectedTabGroup, cleanupStalePlaywrightGroups, isNonDebuggableUrl, ungroupTabs, uniqueGroupStyle } from './connectedTabGroup';
 +import { startQuietBroker } from './quietBroker';
++import { installBackstop } from './agentsApp';
  
  type PageMessage = {
-@@ -120,10 +121,7 @@
+@@ -119,10 +121,7 @@
        this._connections.set(id, group);
  
 -      if (!background) {
@@ -21,13 +305,31 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +      await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
  
        if (tab.id !== selectorTabId)
-@@ -160,2 +160,3 @@
+@@ -151,4 +150,14 @@
+   }
  
- new PlaywrightExtension();
++  // quiet fork: the relay controlling tabId, for the Agents app backstop (agentsApp.ts).
++  relayFor(tabId: number) {
++    for (const group of this._connections.values()) {
++      const relay = group.controls(tabId);
++      if (relay)
++        return relay;
++    }
++    return undefined;
++  }
++
+   private _connectedTabIds(): Set<number> {
+     return new Set([...this._connections.values()].flatMap(group => group.connectedTabIds()));
+@@ -163,3 +172,5 @@
+ }
+ 
+-new PlaywrightExtension();
++const extension = new PlaywrightExtension();
 +startQuietBroker();
++installBackstop(tabId => extension.relayFor(tabId));
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/connectedTabGroup.ts b/src/connectedTabGroup.ts
---- a/src/connectedTabGroup.ts	2026-10-31 10:11:52
-+++ b/src/connectedTabGroup.ts	2026-10-31 10:31:16
+--- a/src/connectedTabGroup.ts	2026-11-05 14:03:21
++++ b/src/connectedTabGroup.ts	2026-11-05 14:04:29
 @@ -76,4 +76,8 @@
    private _isTabReserved: (tabId: number) => boolean;
    private _groupId: number | null = null;
@@ -44,18 +346,36 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +    this._homeWindowId = selectedTab.windowId;
      this._connection.onclose = () => this._onConnectionClose();
      this._connection.ontabattached = (tabId: number) => this._onTabAttached(tabId);
-@@ -203,5 +209,6 @@
+@@ -102,4 +108,9 @@
+   }
+ 
++  // quiet fork: the relay of the client that controls tabId (agentsApp.ts backstop).
++  controls(tabId: number): RelayConnection | undefined {
++    return this._groupTabIds.has(tabId) || this._connection.attachedTabs.has(tabId) ? this._connection : undefined;
++  }
++
+   connectedTabIds(): number[] {
+     return [...this._groupTabIds];
+@@ -209,5 +220,6 @@
        await retryOnDrag(async () => {
          if (this._groupId === null) {
 -          this._groupId = await chrome.tabs.group({ tabIds: [tabId] });
 +          const createProperties = this._homeWindowId !== undefined ? { windowId: this._homeWindowId } : undefined;
 +          this._groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties });
-           await chrome.tabGroups.update(this._groupId, this.groupStyle);
+           await chrome.tabGroups.update(this._groupId, groupStyle);
          } else {
+@@ -218,4 +230,7 @@
+     } catch (error: any) {
+       debugLog('Error adding tab to group:', error);
++      // quiet fork: app windows (the Agents PWA) cannot hold tab groups. Track the tab anyway, or a
++      // navigation that detaches the debugger would never re-attach it (_onTabUpdated).
++      this._groupTabIds.add(tabId);
+     }
+   }
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/quietBroker.ts b/src/quietBroker.ts
 --- a/src/quietBroker.ts	1969-12-31 18:00:00
-+++ b/src/quietBroker.ts	2026-10-31 10:31:16
-@@ -0,0 +1,129 @@
++++ b/src/quietBroker.ts	2026-11-05 14:04:38
+@@ -0,0 +1,149 @@
 +/**
 + * quiet fork (TR #2044): keep a WebSocket to the local /pw broker and open connect pages it hands
 + * us in UNFOCUSED windows. The stock flow has the MCP exec Chrome with --new-window <connect url>,
@@ -72,7 +392,8 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 + */
 +
 +import { debugLog } from './relayConnection';
-+import { setQuietLogSink } from './quietLog';
++import { quietLog, setQuietLogSink } from './quietLog';
++import { AgentsAppNotRunning, openAgentWindow, reportAllAgentWindows, setAgentWindowSink } from './agentsApp';
 +
 +const BROKER_URL = 'ws://127.0.0.1:47117/ext';
 +const RECONNECT_ALARM = 'quiet-broker-reconnect';
@@ -89,6 +410,8 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +  bounds?: { width?: number; height?: number; left?: number; top?: number };
 +  // Agent name: shown on an unpinned first tab (Claude Code icon) so the window is identifiable.
 +  name?: string;
++  // Open the agent's window as an app window of the "Agents" PWA (own uBar item; agentsApp.ts).
++  app?: boolean;
 +};
 +
 +// The title tab is an extension page (static/title.html, copied into dist/ by scripts/build.sh).
@@ -110,6 +433,7 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +}
 +
 +async function hello(): Promise<void> {
++  void reportAllAgentWindows();
 +  send({ type: 'hello', extensionId: chrome.runtime.id, version: chrome.runtime.getManifest().version, token: await storedToken() });
 +}
 +
@@ -124,6 +448,21 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +  if (url.protocol === 'chrome-extension:')
 +    url.host = chrome.runtime.id;
 +  const bounds = { ...DEFAULT_BOUNDS, ...(message.bounds || {}) };
++  if (message.app) {
++    try {
++      const opened = await openAgentWindow(url.toString(), message.name, bounds);
++      send({ type: 'opened', id: message.id, ...opened, name: message.name, app: true });
++      return;
++    } catch (error: any) {
++      // Not running: the shim launches the app and asks again. Anything else: say why, and fall
++      // back to a normal window below so the agent still gets a browser.
++      if (error instanceof AgentsAppNotRunning) {
++        send({ type: 'declined', id: message.id, reason: error.message });
++        return;
++      }
++      quietLog(`agents window failed, falling back to a normal window: ${error?.message || error}`);
++    }
++  }
 +  const win = await chrome.windows.create({ url: url.toString(), focused: false, type: 'normal', ...bounds });
 +  if (!win)
 +    throw new Error('chrome.windows.create returned no window');
@@ -171,6 +510,7 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +export function startQuietBroker(): void {
 +  // Relay close / detach reasons (quietLog.ts) go to the broker's log as `ext <line>`.
 +  setQuietLogSink(line => send({ type: 'log', line }));
++  setAgentWindowSink(message => send(message));
 +  connect();
 +  // The broker may not be running yet (it starts with the first /pw connect); keep trying. The
 +  // alarm also wakes the service worker if Chrome put it to sleep.
@@ -187,7 +527,7 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +}
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/quietLog.ts b/src/quietLog.ts
 --- a/src/quietLog.ts	1969-12-31 18:00:00
-+++ b/src/quietLog.ts	2026-10-31 10:31:16
++++ b/src/quietLog.ts	2026-11-05 14:03:21
 @@ -0,0 +1,27 @@
 +/**
 + * quiet fork (TR #2044): one-line diagnostics for why a /pw relay connection ended. Upstream closes
@@ -217,16 +557,17 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +  }).catch(() => {});
 +}
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/relayConnection.ts b/src/relayConnection.ts
---- a/src/relayConnection.ts	2026-10-31 10:11:52
-+++ b/src/relayConnection.ts	2026-10-31 10:31:16
-@@ -15,4 +15,6 @@
+--- a/src/relayConnection.ts	2026-11-05 14:03:21
++++ b/src/relayConnection.ts	2026-11-05 14:56:35
+@@ -15,4 +15,7 @@
   */
  
 +import { quietLog } from './quietLog';
++import { duplicateInto, isAgentWindow, isDuplicating } from './agentsApp';
 +
  export function debugLog(...args: unknown[]): void {
    const enabled = true;
-@@ -73,4 +75,7 @@
+@@ -73,4 +76,7 @@
    ontabattached?: (tabId: number) => void;
    ontabdetached?: (tabId: number) => void;
 +  // quiet fork: the window the client's first tab lived in. chrome.tabs.create without a windowId
@@ -234,7 +575,7 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +  homeWindowId?: number;
  
    get attachedTabs(): ReadonlySet<number> {
-@@ -82,5 +87,9 @@
+@@ -82,5 +88,9 @@
      this._installEventForwarders();
      this._ws.onmessage = this._onMessage.bind(this);
 -    this._ws.onclose = () => this._onClose();
@@ -245,25 +586,33 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +    };
    }
  
-@@ -94,4 +103,5 @@
+@@ -94,4 +104,5 @@
  
    close(message: string): void {
 +    quietLog(`relay closing: "${message}" attached=[${[...this._attachedTabs]}] pendingReattach=[${[...this._pendingReattach]}]`);
      this._ws.close(1000, message);
      // ws.onclose is called asynchronously, so we call it here to avoid forwarding
-@@ -181,4 +191,5 @@
+@@ -181,4 +192,5 @@
      if (fullMethod === 'chrome.debugger.onDetach') {
        const reason = args[1] as string | undefined;
 +      quietLog(`debugger detached tab=${tabId} reason=${reason} attachedBefore=[${[...this._attachedTabs]}]`);
        this._notifyTabDetached(tabId);
        if (reason === 'target_closed' && this._maybeScheduleReattach(tabId))
-@@ -193,4 +204,5 @@
+@@ -193,4 +205,5 @@
      if (this._recentReattach.has(tabId)) {
        debugLog(`Not re-attaching tab ${tabId}: re-detached within ${REATTACH_COOLDOWN_MS}ms`);
 +      quietLog(`not re-attaching tab=${tabId}: re-detached within ${REATTACH_COOLDOWN_MS}ms`);
        return false;
      }
-@@ -280,6 +292,17 @@
+@@ -241,4 +254,7 @@
+       case 'chrome.tabs.onCreated': {
+         const tab = args[0] as chrome.tabs.Tab;
++        // quiet fork: a tab duplicateInto is creating is not a popup (agentsApp.ts isDuplicating).
++        if (isDuplicating(tab.windowId))
++          return undefined;
+         // Forward only popups opened by an attached tab; report the opener so cdpRelay
+         // can filter / decide. We use the openerTabId for the attached-tab check.
+@@ -280,6 +296,23 @@
      if (!ALLOWED_CHROME_COMMANDS.has(message.method))
        throw new Error(`Unknown method: ${message.method}`);
 -    const args = (message.params ?? []) as any[];
@@ -272,6 +621,12 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +    if (message.method === 'chrome.tabs.create' && this.homeWindowId !== undefined && args[0] && args[0].windowId === undefined)
 +      args = [{ ...args[0], windowId: this.homeWindowId, active: true }];
 +    let result: any;
++    // quiet fork: an app window (the Agents PWA) refuses tabs.create - Chrome puts the tab in the
++    // user's last normal window instead. Duplicate a tab inside the agent's window and navigate it.
++    if (message.method === 'chrome.tabs.create' && this.homeWindowId !== undefined && await isAgentWindow(this.homeWindowId)) {
++      const props = (args[0] || {}) as chrome.tabs.CreateProperties;
++      return await duplicateInto(this.homeWindowId, props.url, props.active !== false);
++    }
 +    try {
 +      result = await invokeChromeMethod(message.method, args);
 +    } catch (error: any) {
@@ -284,8 +639,8 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
      // Attach bookkeeping; detach flows through the chrome.debugger.onDetach event.
      if (message.method === 'chrome.debugger.attach') {
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/ui/authToken.tsx b/src/ui/authToken.tsx
---- a/src/ui/authToken.tsx	2026-10-31 10:11:52
-+++ b/src/ui/authToken.tsx	2026-10-31 10:31:16
+--- a/src/ui/authToken.tsx	2026-11-05 14:03:21
++++ b/src/ui/authToken.tsx	2026-11-05 14:03:21
 @@ -26,4 +26,5 @@
      const newToken = generateAuthToken();
      localStorage.setItem('auth-token', newToken);
