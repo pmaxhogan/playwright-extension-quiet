@@ -1,7 +1,7 @@
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/agentsApp.ts b/src/agentsApp.ts
 --- a/src/agentsApp.ts	1969-12-31 18:00:00
-+++ b/src/agentsApp.ts	2026-11-05 14:10:48
-@@ -0,0 +1,259 @@
++++ b/src/agentsApp.ts	2026-11-05 14:56:35
+@@ -0,0 +1,279 @@
 +/**
 + * quiet fork: agent windows as app windows of the "Agents" PWA.
 + *
@@ -190,7 +190,27 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 + * A new tab in an agent app window, navigated to `url`. Duplicating the window's title tab is
 + * the only API path that keeps a new tab inside an app window.
 + */
++// Windows with a duplicateInto in flight. Chrome gives a duplicate the window's ACTIVE tab as its
++// opener, so when that tab is driven by Playwright the relay would forward the duplicate as a
++// popup, Playwright would attach it, and the caller's own attach then fails ("Another debugger is
++// already attached", measured 2026-11-05). relayConnection skips onCreated for these windows.
++const duplicating = new Map<number, number>();
++
++export function isDuplicating(windowId: number | undefined): boolean {
++  return windowId !== undefined && (duplicating.get(windowId) || 0) > 0;
++}
++
 +export async function duplicateInto(windowId: number, url: string | undefined, active: boolean): Promise<chrome.tabs.Tab> {
++  duplicating.set(windowId, (duplicating.get(windowId) || 0) + 1);
++  try {
++    return await duplicateIntoInner(windowId, url, active);
++  } finally {
++    // onCreated is dispatched before duplicate() resolves; keep the flag a beat longer.
++    setTimeout(() => duplicating.set(windowId, Math.max(0, (duplicating.get(windowId) || 1) - 1)), 250);
++  }
++}
++
++async function duplicateIntoInner(windowId: number, url: string | undefined, active: boolean): Promise<chrome.tabs.Tab> {
 +  const win = await chrome.windows.get(windowId, { populate: true });
 +  const source = (win.tabs || []).find(t => isAgentsUrl(t.url) || isAgentsUrl(t.pendingUrl)) || (win.tabs || [])[0];
 +  if (!source?.id)
@@ -538,12 +558,12 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +}
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/relayConnection.ts b/src/relayConnection.ts
 --- a/src/relayConnection.ts	2026-11-05 14:03:21
-+++ b/src/relayConnection.ts	2026-11-05 14:04:29
++++ b/src/relayConnection.ts	2026-11-05 14:56:35
 @@ -15,4 +15,7 @@
   */
  
 +import { quietLog } from './quietLog';
-+import { duplicateInto, isAgentWindow } from './agentsApp';
++import { duplicateInto, isAgentWindow, isDuplicating } from './agentsApp';
 +
  export function debugLog(...args: unknown[]): void {
    const enabled = true;
@@ -584,7 +604,15 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +      quietLog(`not re-attaching tab=${tabId}: re-detached within ${REATTACH_COOLDOWN_MS}ms`);
        return false;
      }
-@@ -280,6 +293,23 @@
+@@ -241,4 +254,7 @@
+       case 'chrome.tabs.onCreated': {
+         const tab = args[0] as chrome.tabs.Tab;
++        // quiet fork: a tab duplicateInto is creating is not a popup (agentsApp.ts isDuplicating).
++        if (isDuplicating(tab.windowId))
++          return undefined;
+         // Forward only popups opened by an attached tab; report the opener so cdpRelay
+         // can filter / decide. We use the openerTabId for the attached-tab check.
+@@ -280,6 +296,23 @@
      if (!ALLOWED_CHROME_COMMANDS.has(message.method))
        throw new Error(`Unknown method: ${message.method}`);
 -    const args = (message.params ?? []) as any[];
