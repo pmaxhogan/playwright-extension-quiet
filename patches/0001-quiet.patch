@@ -1,7 +1,7 @@
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/agentsApp.ts b/src/agentsApp.ts
 --- a/src/agentsApp.ts	1969-12-31 18:00:00
-+++ b/src/agentsApp.ts	2026-11-05 14:56:35
-@@ -0,0 +1,279 @@
++++ b/src/agentsApp.ts	2026-11-13 08:58:05
+@@ -0,0 +1,277 @@
 +/**
 + * quiet fork: agent windows as app windows of the "Agents" PWA.
 + *
@@ -25,7 +25,6 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 + *   window.opener keeps working).
 + */
 +
-+import { debugLog } from './relayConnection';
 +import { quietLog } from './quietLog';
 +
 +export const AGENTS_ORIGIN = 'http://127.0.0.1:47117';
@@ -279,103 +278,161 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +    await chrome.tabs.update(userTab, { active: true }).catch(() => {});
 +  quietLog(`backstop moved tab ${tab.id} (${(url || '').slice(0, 60)}) from window ${tab.windowId} into agent window ${opener.windowId} as tab ${moved.id}`);
 +  relayForTab(opener.id!)?.attachTab(moved);
-+  debugLog('agents backstop moved', tab.id, '->', moved.id);
 +}
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/background.ts b/src/background.ts
---- a/src/background.ts	2026-11-05 14:03:21
-+++ b/src/background.ts	2026-11-05 14:04:29
-@@ -18,4 +18,6 @@
- import { PendingConnections } from './pendingConnection';
- import { ConnectedTabGroup, cleanupStalePlaywrightGroups, isNonDebuggableUrl, ungroupTabs, uniqueGroupStyle } from './connectedTabGroup';
+--- a/src/background.ts	2026-11-13 08:57:30
++++ b/src/background.ts	2026-11-13 08:57:50
+@@ -21,4 +21,6 @@
+ import { TabPicker } from './tabPicker';
+ import { TabRegistry } from './tabRegistry';
 +import { startQuietBroker } from './quietBroker';
 +import { installBackstop } from './agentsApp';
  
- type PageMessage = {
-@@ -119,10 +121,7 @@
-       this._connections.set(id, group);
+ import type { PageMessage } from './types';
+@@ -27,4 +29,5 @@
+   private _broker: ConnectionBroker;
+   private _picker: TabPicker;
++  private _registry: TabRegistry;
+   private _ready: Promise<unknown>;
  
--      if (!background) {
--        await Promise.all([
--          chrome.tabs.update(tab.id, { active: true }),
--          chrome.windows.update(tab.windowId, { focused: true }),
--        ]).catch(() => {});
--      }
-+      // quiet fork: activate the tab inside its own window, but never focus the window - that
-+      // activates Chrome and steals the user's keyboard (TR #2044).
-+      await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
- 
-       if (tab.id !== selectorTabId)
-@@ -151,4 +150,14 @@
+@@ -32,4 +35,5 @@
+     const listeners = new ChromeListeners();
+     const registry = new TabRegistry(listeners);
++    this._registry = registry;
+     const groups = new TabGroupManager(registry, listeners);
+     this._ready = Promise.all([registry.ready, groups.ready]);
+@@ -40,4 +44,10 @@
    }
  
-+  // quiet fork: the relay controlling tabId, for the Agents app backstop (agentsApp.ts).
-+  relayFor(tabId: number) {
-+    for (const group of this._connections.values()) {
-+      const relay = group.controls(tabId);
-+      if (relay)
-+        return relay;
-+    }
-+    return undefined;
++  // quiet fork: the client that controls tabId, for the Agents app backstop (agentsApp.ts).
++  clientFor(tabId: number): { attachTab(tab: chrome.tabs.Tab): void } | undefined {
++    const session = this._registry.ownerOf(tabId);
++    return session && { attachTab: tab => this._registry.claim(tab, session) };
 +  }
 +
-   private _connectedTabIds(): Set<number> {
-     return new Set([...this._connections.values()].flatMap(group => group.connectedTabIds()));
-@@ -163,3 +172,5 @@
+   private async _showManagePage(): Promise<void> {
+     const url = chrome.runtime.getURL('manage.html');
+@@ -79,3 +89,5 @@
  }
  
--new PlaywrightExtension();
-+const extension = new PlaywrightExtension();
+-new Extension();
++const extension = new Extension();
 +startQuietBroker();
-+installBackstop(tabId => extension.relayFor(tabId));
-diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/connectedTabGroup.ts b/src/connectedTabGroup.ts
---- a/src/connectedTabGroup.ts	2026-11-05 14:03:21
-+++ b/src/connectedTabGroup.ts	2026-11-05 14:04:29
-@@ -76,4 +76,8 @@
-   private _isTabReserved: (tabId: number) => boolean;
-   private _groupId: number | null = null;
-+  // quiet fork: chrome.tabs.group() without createProperties.windowId creates the group in the
-+  // CURRENT (last-focused) window and drags the tab there - into the user's window, or out of the
-+  // unfocused window the connect page was opened in. Create it in the client's own window.
-+  private _homeWindowId: number | undefined;
-   private _groupTabIds: Set<number> = new Set();
-   private _onTabUpdatedListener: (tabId: number, changeInfo: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => void;
-@@ -87,4 +91,6 @@
-     this._isTabReserved = isTabReserved;
-     this._connection = connection;
-+    this._connection.homeWindowId = selectedTab.windowId;
-+    this._homeWindowId = selectedTab.windowId;
-     this._connection.onclose = () => this._onConnectionClose();
-     this._connection.ontabattached = (tabId: number) => this._onTabAttached(tabId);
-@@ -102,4 +108,9 @@
++installBackstop(tabId => extension.clientFor(tabId));
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/channel.ts b/src/channel.ts
+--- a/src/channel.ts	2026-11-13 08:57:30
++++ b/src/channel.ts	2026-11-13 08:57:54
+@@ -16,4 +16,6 @@
+ 
+ 
++import { quietLog } from './quietLog';
++
+ const OPEN_TIMEOUT_MS = 5000;
+ 
+@@ -46,5 +48,9 @@
+     this._ws = ws;
+     this._ws.onmessage = event => void this._onMessage(event.data);
+-    this._ws.onclose = () => this._didClose();
++    this._ws.onclose = event => {
++      // quiet fork: say who ended the connection (the MCP side closing its websocket).
++      quietLog(`relay ws closed by peer code=${event.code} reason="${event.reason}"`);
++      this._didClose();
++    };
    }
  
-+  // quiet fork: the relay of the client that controls tabId (agentsApp.ts backstop).
-+  controls(tabId: number): RelayConnection | undefined {
-+    return this._groupTabIds.has(tabId) || this._connection.attachedTabs.has(tabId) ? this._connection : undefined;
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/clientSession.ts b/src/clientSession.ts
+--- a/src/clientSession.ts	2026-11-13 08:57:30
++++ b/src/clientSession.ts	2026-11-13 08:57:50
+@@ -17,4 +17,6 @@
+ 
+ import { checkCdpMethod } from './cdpPolicy';
++import { duplicateInto, isAgentWindow } from './agentsApp';
++import { quietLog } from './quietLog';
+ 
+ import type { Channel } from './channel';
+@@ -29,4 +31,7 @@
+ 
+   onClose?: () => void;
++  // quiet fork: the window the client's first tab lived in. chrome.tabs.create without a windowId
++  // lands ACTIVE in the user's last-focused window; aim it at the client's own window instead.
++  homeWindowId?: number;
+ 
+   constructor(channel: Channel, registry: TabRegistry, options: SessionOptions) {
+@@ -39,4 +44,5 @@
+ 
+   close(reason: string): void {
++    quietLog(`relay closing: "${reason}"`);
+     this._channel.close(reason);
+   }
+@@ -84,5 +90,5 @@
+       case 'chrome.tabs.create': {
+         const [{ url, active }] = params;
+-        const tab = await chrome.tabs.create({ url, active });
++        const tab = await this._createTab(url, active);
+         // The response announces the tab to the client.
+         if (!this._channel.closed)
+@@ -98,4 +104,20 @@
+     }
+     throw new Error(`Unknown method: ${method}`);
 +  }
 +
-   connectedTabIds(): number[] {
-     return [...this._groupTabIds];
-@@ -209,5 +220,6 @@
-       await retryOnDrag(async () => {
-         if (this._groupId === null) {
--          this._groupId = await chrome.tabs.group({ tabIds: [tabId] });
-+          const createProperties = this._homeWindowId !== undefined ? { windowId: this._homeWindowId } : undefined;
-+          this._groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties });
-           await chrome.tabGroups.update(this._groupId, groupStyle);
-         } else {
-@@ -218,4 +230,7 @@
-     } catch (error: any) {
-       debugLog('Error adding tab to group:', error);
-+      // quiet fork: app windows (the Agents PWA) cannot hold tab groups. Track the tab anyway, or a
-+      // navigation that detaches the debugger would never re-attach it (_onTabUpdated).
-+      this._groupTabIds.add(tabId);
-     }
++  private async _createTab(url: string | undefined, active: boolean | undefined): Promise<chrome.tabs.Tab> {
++    const home = this.homeWindowId;
++    if (home === undefined)
++      return await chrome.tabs.create({ url, active });
++    // quiet fork: an app window (the Agents PWA) refuses tabs.create - Chrome puts the tab in the
++    // user's last normal window instead. Duplicate a tab inside the agent's window and navigate it.
++    if (await isAgentWindow(home))
++      return await duplicateInto(home, url, active !== false);
++    try {
++      return await chrome.tabs.create({ url, active: true, windowId: home });
++    } catch {
++      // The home window may be gone; fall back to Chrome's default placement.
++      return await chrome.tabs.create({ url, active });
++    }
    }
+ 
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/connectionBroker.ts b/src/connectionBroker.ts
+--- a/src/connectionBroker.ts	2026-11-13 08:57:30
++++ b/src/connectionBroker.ts	2026-11-13 08:57:50
+@@ -81,4 +81,5 @@
+       this._groups.register(session);
+       const tabs = await this._picker.apply(selection, session, connectTabId);
++      session.homeWindowId = tabs[0]?.windowId;
+       session.didInitialize();
+       await this._show(tabs, connectTabId, options.background);
+@@ -115,8 +116,7 @@
+     const [firstTab] = tabs;
+     if (firstTab && !background) {
+-      await Promise.all([
+-        chrome.tabs.update(firstTab.id!, { active: true }),
+-        chrome.windows.update(firstTab.windowId, { focused: true }),
+-      ]).catch(() => {});
++      // quiet fork: activate the tab inside its own window, but never focus the window - that
++      // activates Chrome and steals the user's keyboard (TR #2044).
++      await chrome.tabs.update(firstTab.id!, { active: true }).catch(() => {});
+     }
+     if (!tabs.some(tab => tab.id === connectTabId))
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/ownedTab.ts b/src/ownedTab.ts
+--- a/src/ownedTab.ts	2026-11-13 08:57:30
++++ b/src/ownedTab.ts	2026-11-13 08:57:54
+@@ -16,4 +16,6 @@
+ 
+ 
++import { quietLog } from './quietLog';
++
+ import type { ClientSession } from './clientSession';
+ 
+@@ -81,4 +83,5 @@
+ 
+   didDetachDebugger(reason: string): void {
++    quietLog(`debugger detached tab=${this.tabId} reason=${reason}`);
+     this._setAttached(false);
+     this.session.debuggerDetached(this.tabId, reason);
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/quietBroker.ts b/src/quietBroker.ts
 --- a/src/quietBroker.ts	1969-12-31 18:00:00
-+++ b/src/quietBroker.ts	2026-11-05 14:04:38
-@@ -0,0 +1,149 @@
++++ b/src/quietBroker.ts	2026-11-13 08:58:05
+@@ -0,0 +1,148 @@
 +/**
 + * quiet fork (TR #2044): keep a WebSocket to the local /pw broker and open connect pages it hands
 + * us in UNFOCUSED windows. The stock flow has the MCP exec Chrome with --new-window <connect url>,
@@ -391,7 +448,6 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 + * carry the fork's token, not the Web Store extension's.
 + */
 +
-+import { debugLog } from './relayConnection';
 +import { quietLog, setQuietLogSink } from './quietLog';
 +import { AgentsAppNotRunning, openAgentWindow, reportAllAgentWindows, setAgentWindowSink } from './agentsApp';
 +
@@ -485,7 +541,7 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +  try {
 +    socket = new WebSocket(BROKER_URL);
 +  } catch (error) {
-+    debugLog('quiet broker: cannot open socket', error);
++    quietLog(`quiet broker: cannot open socket: ${error}`);
 +    return;
 +  }
 +  socket.onopen = () => void hello();
@@ -527,7 +583,7 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +}
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/quietLog.ts b/src/quietLog.ts
 --- a/src/quietLog.ts	1969-12-31 18:00:00
-+++ b/src/quietLog.ts	2026-11-05 14:03:21
++++ b/src/quietLog.ts	2026-11-13 08:57:30
 @@ -0,0 +1,27 @@
 +/**
 + * quiet fork (TR #2044): one-line diagnostics for why a /pw relay connection ended. Upstream closes
@@ -556,98 +612,59 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +    return chrome.storage.local.set({ 'quiet-log': ring.slice(-100) });
 +  }).catch(() => {});
 +}
-diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/relayConnection.ts b/src/relayConnection.ts
---- a/src/relayConnection.ts	2026-11-05 14:03:21
-+++ b/src/relayConnection.ts	2026-11-05 14:56:35
-@@ -15,4 +15,7 @@
-  */
- 
-+import { quietLog } from './quietLog';
-+import { duplicateInto, isAgentWindow, isDuplicating } from './agentsApp';
-+
- export function debugLog(...args: unknown[]): void {
-   const enabled = true;
-@@ -73,4 +76,7 @@
-   ontabattached?: (tabId: number) => void;
-   ontabdetached?: (tabId: number) => void;
-+  // quiet fork: the window the client's first tab lived in. chrome.tabs.create without a windowId
-+  // lands ACTIVE in the user's last-focused window; aim it at the client's own window instead.
-+  homeWindowId?: number;
- 
-   get attachedTabs(): ReadonlySet<number> {
-@@ -82,5 +88,9 @@
-     this._installEventForwarders();
-     this._ws.onmessage = this._onMessage.bind(this);
--    this._ws.onclose = () => this._onClose();
-+    this._ws.onclose = event => {
-+      // quiet fork: say who ended the connection (the MCP side closing its websocket).
-+      quietLog(`relay ws closed by peer code=${event.code} reason="${event.reason}" attached=[${[...this._attachedTabs]}]`);
-+      this._onClose();
-+    };
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/tabGroupManager.ts b/src/tabGroupManager.ts
+--- a/src/tabGroupManager.ts	2026-11-13 08:57:30
++++ b/src/tabGroupManager.ts	2026-11-13 08:57:50
+@@ -38,8 +38,12 @@
    }
  
-@@ -94,4 +104,5 @@
+-  async add(tabId: number): Promise<void> {
++  async add(tabId: number, windowId: number | undefined): Promise<void> {
+     const isNewGroup = await changeGroups(async () => {
+       const isNewGroup = this.groupId === undefined;
+-      this.groupId = await chrome.tabs.group({ groupId: this.groupId, tabIds: [tabId] });
++      // quiet fork: chrome.tabs.group() without createProperties.windowId creates the group in the
++      // CURRENT (last-focused) window and drags the tab there - into the user's window, or out of the
++      // unfocused window the connect page was opened in. Create it in the tab's own window.
++      const createProperties = this.groupId === undefined && windowId !== undefined ? { windowId } : undefined;
++      this.groupId = await chrome.tabs.group({ groupId: this.groupId, tabIds: [tabId], createProperties });
+       return isNewGroup;
+     });
+@@ -125,5 +129,5 @@
+     const isNewGroup = group.groupId === undefined;
+     // Chrome does not put the tab of a popup window into a group.
+-    await group.add(tab.id!).catch(() => {});
++    await group.add(tab.id!, tab.windowId).catch(() => {});
+     if (isNewGroup)
+       await this._recordClientGroups();
+diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/tabRegistry.ts b/src/tabRegistry.ts
+--- a/src/tabRegistry.ts	2026-11-13 08:57:30
++++ b/src/tabRegistry.ts	2026-11-13 08:57:50
+@@ -18,4 +18,6 @@
+ import { OwnedTab, detachDebuggersOfPreviousServiceWorker } from './ownedTab';
  
-   close(message: string): void {
-+    quietLog(`relay closing: "${message}" attached=[${[...this._attachedTabs]}] pendingReattach=[${[...this._pendingReattach]}]`);
-     this._ws.close(1000, message);
-     // ws.onclose is called asynchronously, so we call it here to avoid forwarding
-@@ -181,4 +192,5 @@
-     if (fullMethod === 'chrome.debugger.onDetach') {
-       const reason = args[1] as string | undefined;
-+      quietLog(`debugger detached tab=${tabId} reason=${reason} attachedBefore=[${[...this._attachedTabs]}]`);
-       this._notifyTabDetached(tabId);
-       if (reason === 'target_closed' && this._maybeScheduleReattach(tabId))
-@@ -193,4 +205,5 @@
-     if (this._recentReattach.has(tabId)) {
-       debugLog(`Not re-attaching tab ${tabId}: re-detached within ${REATTACH_COOLDOWN_MS}ms`);
-+      quietLog(`not re-attaching tab=${tabId}: re-detached within ${REATTACH_COOLDOWN_MS}ms`);
-       return false;
-     }
-@@ -241,4 +254,7 @@
-       case 'chrome.tabs.onCreated': {
-         const tab = args[0] as chrome.tabs.Tab;
-+        // quiet fork: a tab duplicateInto is creating is not a popup (agentsApp.ts isDuplicating).
-+        if (isDuplicating(tab.windowId))
-+          return undefined;
-         // Forward only popups opened by an attached tab; report the opener so cdpRelay
-         // can filter / decide. We use the openerTabId for the attached-tab check.
-@@ -280,6 +296,23 @@
-     if (!ALLOWED_CHROME_COMMANDS.has(message.method))
-       throw new Error(`Unknown method: ${message.method}`);
--    const args = (message.params ?? []) as any[];
--    const result = await invokeChromeMethod(message.method, args);
-+    let args = (message.params ?? []) as any[];
-+    if (message.method === 'chrome.tabs.create' && this.homeWindowId !== undefined && args[0] && args[0].windowId === undefined)
-+      args = [{ ...args[0], windowId: this.homeWindowId, active: true }];
-+    let result: any;
-+    // quiet fork: an app window (the Agents PWA) refuses tabs.create - Chrome puts the tab in the
-+    // user's last normal window instead. Duplicate a tab inside the agent's window and navigate it.
-+    if (message.method === 'chrome.tabs.create' && this.homeWindowId !== undefined && await isAgentWindow(this.homeWindowId)) {
-+      const props = (args[0] || {}) as chrome.tabs.CreateProperties;
-+      return await duplicateInto(this.homeWindowId, props.url, props.active !== false);
-+    }
-+    try {
-+      result = await invokeChromeMethod(message.method, args);
-+    } catch (error: any) {
-+      // The home window may be gone; fall back to Chrome's default placement.
-+      if (message.method === 'chrome.tabs.create' && args !== message.params)
-+        result = await invokeChromeMethod(message.method, (message.params ?? []) as any[]);
-+      else
-+        throw error;
-+    }
-     // Attach bookkeeping; detach flows through the chrome.debugger.onDetach event.
-     if (message.method === 'chrome.debugger.attach') {
++import { isDuplicating } from './agentsApp';
++
+ import type { ChromeListeners } from './chromeListeners';
+ import type { ClientSession } from './clientSession';
+@@ -105,4 +107,7 @@
+ 
+   private _onTabCreated(tab: chrome.tabs.Tab): void {
++    // quiet fork: a tab duplicateInto is creating is not a popup (agentsApp.ts isDuplicating).
++    if (isDuplicating(tab.windowId))
++      return;
+     const opener = tab.openerTabId === undefined ? undefined : this.ownerOf(tab.openerTabId);
+     if (opener)
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/ui/authToken.tsx b/src/ui/authToken.tsx
---- a/src/ui/authToken.tsx	2026-11-05 14:03:21
-+++ b/src/ui/authToken.tsx	2026-11-05 14:03:21
+--- a/src/ui/authToken.tsx	2026-11-13 08:57:30
++++ b/src/ui/authToken.tsx	2026-11-13 08:57:30
 @@ -26,4 +26,5 @@
      const newToken = generateAuthToken();
      localStorage.setItem('auth-token', newToken);
 +    void chrome.storage.local.set({ 'auth-token': newToken });
      setAuthToken(newToken);
    }, []);
-@@ -69,4 +70,7 @@
+@@ -75,4 +76,7 @@
      localStorage.setItem('auth-token', token);
    }
 +  // quiet fork: mirror the token where the service worker can read it, so the broker can route a
