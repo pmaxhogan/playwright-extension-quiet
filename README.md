@@ -49,6 +49,7 @@ The extension id is stable: `jiobfmhnaneikbfofhbdkklfgennkcmn`. It is derived fr
   Web Store needs a strictly higher version per upload), commits `chore: sync upstream to <sha>`
   to main, and calls `publish.yml`. On a build failure (patch conflict or compile error) it opens
   or updates one issue titled "Upstream sync failed: patches no longer apply" and the run goes red.
+  The next sync that builds and lands closes that issue with a link to the run.
 - `publish.yml`: runs on pushes to main that touch `upstream/`, `patches/`, `scripts/`,
   `VERSION_SUFFIX` or `package.json`, on manual dispatch, and when called by the sync workflow.
   It builds, uploads to the Chrome Web Store with `chrome-webstore-upload-cli`, and creates a

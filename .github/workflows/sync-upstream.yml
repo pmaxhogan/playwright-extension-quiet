@@ -86,6 +86,22 @@ jobs:
           git push origin HEAD:main
           echo "pushed=true" >> "$GITHUB_OUTPUT"
 
+      # The sync landed, so the patch applies and builds again: close the failure issue that
+      # "Report failed sync" opened. continue-on-error because a failed close must not stop the
+      # publish job below (its `if` has no status function, so any failed step here skips it).
+      - name: Close the failed-sync issue
+        if: steps.commit.outputs.pushed == 'true'
+        continue-on-error: true
+        run: |
+          title="Upstream sync failed: patches no longer apply"
+          sha="${{ steps.sync.outputs.sha }}"
+          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          for n in $(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+              --jq ".[] | select(.title == \"$title\") | .number"); do
+            gh issue close "$n" --reason completed \
+              --comment "Upstream \`$sha\` now applies and builds with the patch; synced in $run"
+          done
+
   publish:
     needs: sync
     if: needs.sync.outputs.pushed == 'true'
