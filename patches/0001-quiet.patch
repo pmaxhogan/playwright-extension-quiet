@@ -612,31 +612,6 @@ diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x mani
 +    return chrome.storage.local.set({ 'quiet-log': ring.slice(-100) });
 +  }).catch(() => {});
 +}
-diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/tabGroupManager.ts b/src/tabGroupManager.ts
---- a/src/tabGroupManager.ts	2026-11-13 08:57:30
-+++ b/src/tabGroupManager.ts	2026-11-13 08:57:50
-@@ -38,8 +38,12 @@
-   }
- 
--  async add(tabId: number): Promise<void> {
-+  async add(tabId: number, windowId: number | undefined): Promise<void> {
-     const isNewGroup = await changeGroups(async () => {
-       const isNewGroup = this.groupId === undefined;
--      this.groupId = await chrome.tabs.group({ groupId: this.groupId, tabIds: [tabId] });
-+      // quiet fork: chrome.tabs.group() without createProperties.windowId creates the group in the
-+      // CURRENT (last-focused) window and drags the tab there - into the user's window, or out of the
-+      // unfocused window the connect page was opened in. Create it in the tab's own window.
-+      const createProperties = this.groupId === undefined && windowId !== undefined ? { windowId } : undefined;
-+      this.groupId = await chrome.tabs.group({ groupId: this.groupId, tabIds: [tabId], createProperties });
-       return isNewGroup;
-     });
-@@ -125,5 +129,5 @@
-     const isNewGroup = group.groupId === undefined;
-     // Chrome does not put the tab of a popup window into a group.
--    await group.add(tab.id!).catch(() => {});
-+    await group.add(tab.id!, tab.windowId).catch(() => {});
-     if (isNewGroup)
-       await this._recordClientGroups();
 diff -ruN -U2 -x node_modules -x dist -x package-lock.json -x .gitignore -x manifest.json -x manifest.store.json -x package.json a/src/tabRegistry.ts b/src/tabRegistry.ts
 --- a/src/tabRegistry.ts	2026-11-13 08:57:30
 +++ b/src/tabRegistry.ts	2026-11-13 08:57:50
